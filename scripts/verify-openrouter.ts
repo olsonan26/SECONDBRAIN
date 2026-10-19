@@ -51,7 +51,7 @@ async function main() {
       assert.ok(!("apiKey" in after));
       console.log("PASS: shared OpenRouter settings persisted without replacing the key or writing rules.");
       await page.getByRole("button", { name: "Ask your knowledge", exact: true }).click();
-      await page.getByLabel("Your question", { exact: true }).fill("What do the sources say about personal year 7 and reflection? Give a short answer and attribute the ideas to the sources.");
+      await page.getByLabel("Your question", { exact: true }).fill("What is a personal year?");
       const answerResponse = page.waitForResponse(r => r.url().endsWith("/api/ask"), { timeout: 125_000 });
       await page.getByRole("button", { name: "Ask the brain", exact: true }).click();
       const answer = await (await answerResponse).json();
@@ -63,7 +63,7 @@ async function main() {
       await expect(page.locator(".inspector-body")).toContainText(answer.citations[0].text.slice(0, 70));
       console.log(`PASS: live OpenRouter answer passed citation and evidence review; ${answer.citations.length} citations open in the browser.`);
       await page.getByRole("button", { name: "Writing studio", exact: true }).click();
-      await page.getByLabel("What are we writing?", { exact: true }).fill("Write a short 120-word article for newcomers about personal year 7, reflection and study. Present these as the sources' numerology interpretations, not proven facts. Start with an engaging truthful hook. No invented examples or promises.");
+      await page.getByLabel("What are we writing?", { exact: true }).fill("Write a short article about personal year 7, reflection and study.");
       const draftResponse = page.waitForResponse(r => r.url().endsWith("/api/drafts") && r.request().method() === "POST", { timeout: 125_000 });
       await page.getByRole("button", { name: "Create source-based draft", exact: true }).click();
       const draftHttp = await draftResponse;
