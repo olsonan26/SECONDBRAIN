@@ -7,7 +7,7 @@ A private, shared workspace for connected knowledge, cited research, and evidenc
 - Interactive brain graph with extracted, inferred, and ambiguous relationships.
 - Ranked passage search with exact source, page, and line references.
 - Optional OpenRouter or direct DeepSeek synthesis with citation checks and a separate source-support review.
-- Shared article drafts, revision conflict protection, Markdown export, and research workflows.
+- Shared article drafts, revision conflict protection, one-click article copying (including unsaved edits), Markdown export, and research workflows.
 - Owner and member accounts, authenticated source access, and private cloud storage.
 - PDF, Word, Markdown, text, and Graphify JSON imports.
 
