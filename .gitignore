@@ -10,3 +10,6 @@ playwright-report/
 *.tsbuildinfo
 graphify-out/
 .tools/
+
+.vercel
+.env*

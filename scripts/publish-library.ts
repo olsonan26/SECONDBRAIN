@@ -2,6 +2,7 @@ import { get, put } from "@vercel/blob";
 import { readFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 
+async function main() {
 if (!process.env.BLOB_READ_WRITE_TOKEN && !process.env.BLOB_STORE_ID) {
   throw new Error("Connect the private Vercel Blob store and pull its environment before publishing the library.");
 }
@@ -23,3 +24,5 @@ if (verify?.statusCode !== 200) throw new Error("Private upload could not be rea
 const roundtrip = await new Response(verify.stream).text();
 if (createHash("sha256").update(roundtrip).digest("hex") !== createHash("sha256").update(text).digest("hex")) throw new Error("Private upload verification failed.");
 console.log(`Private library published and verified: ${corpus.sources.length} sources, ${corpus.passages.length} passages. No public URL was created.`);
+}
+main().catch(error => { console.error(error instanceof Error ? error.message : "Private library publication failed."); process.exitCode = 1; });
