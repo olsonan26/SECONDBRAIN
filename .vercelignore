@@ -1,0 +1,10 @@
+.git/
+node_modules/
+.next/
+.env*
+private/
+ACCESS-PRIVATE.txt
+test-results/
+playwright-report/
+.tools/
+graphify-out/

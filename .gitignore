@@ -1,0 +1,12 @@
+node_modules/
+.next/
+.vercel/
+private/
+.env*
+!.env.example
+ACCESS-PRIVATE.txt
+test-results/
+playwright-report/
+*.tsbuildinfo
+graphify-out/
+.tools/
