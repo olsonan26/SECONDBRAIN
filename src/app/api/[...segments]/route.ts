@@ -68,7 +68,7 @@ async function handle(request: Request, context: Context) {
     }
     if (route === "settings" && request.method === "POST") {
       await requireUser(true);
-      const input = z.object({ model: z.string().trim().min(1).max(100).regex(/^[a-zA-Z0-9_.:/-]+$/), apiKey: z.string().max(500).optional(), writingInstructions: z.string().max(6000) }).parse(await body(request));
+      const input = z.object({ provider: z.enum(["deepseek", "openrouter"]).optional(), model: z.string().trim().min(1).max(100).regex(/^[a-zA-Z0-9_.:/-]+$/), apiKey: z.string().trim().max(500).regex(/^\S*$/, "Paste only the API key, without spaces, line breaks, or angle brackets.").refine(key => !/[<>]/.test(key), "Paste only the API key, without angle brackets.").optional(), writingInstructions: z.string().max(6000) }).parse(await body(request));
       return json(await saveSettings(input));
     }
     if (route === "import" && request.method === "POST") {

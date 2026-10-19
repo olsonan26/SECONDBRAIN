@@ -34,7 +34,7 @@ export async function ask(question: string, sourceIds: string[] = []): Promise<A
   }
   if (!result.text) {
     result.text = extractiveText(citations);
-    if (!settings.apiKey) result.warnings.push("These are retrieved source excerpts. Connect DeepSeek in Settings for a written answer based on this evidence.");
+    if (!settings.apiKey) result.warnings.push("These are retrieved source excerpts. Connect a model in Settings for a written answer based on this evidence.");
   }
   return result;
 }
@@ -43,7 +43,7 @@ export async function createDraft(brief: string, title: string | undefined, sour
   const [corpus, settings] = await Promise.all([getCorpus(), getSettings()]);
   const citations = retrieve(corpus, brief, sourceIds, 10);
   if (!citations.length) throw new HttpError(422, "No supporting passages were found for this brief. Add a specific topic or choose relevant sources first.");
-  let text = `# ${title || brief}\n\n## Editorial brief\n\n${brief}\n\n## Evidence to build on\n\n${extractiveText(citations)}\n\n## Suggested structure\n\n- Introduce the question using the source evidence.\n- Develop the central ideas, with citations for each factual paragraph.\n- Explain connections while distinguishing source statements from interpretation.\n- Close with what the sources support and the questions they leave open.\n\n*Evidence outline: connect DeepSeek to generate article prose, then review it before publication.*`;
+  let text = `# ${title || brief}\n\n## Editorial brief\n\n${brief}\n\n## Evidence to build on\n\n${extractiveText(citations)}\n\n## Suggested structure\n\n- Introduce the question using the source evidence.\n- Develop the central ideas, with citations for each factual paragraph.\n- Explain connections while distinguishing source statements from interpretation.\n- Close with what the sources support and the questions they leave open.\n\n*Evidence outline: connect a model to generate article prose, then review it before publication.*`;
   let mode: Draft["mode"] = "extractive", actualTitle = title || brief;
   if (settings.apiKey) {
     const generated = await generateGrounded(brief, citations, settings, true);

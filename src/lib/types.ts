@@ -92,7 +92,7 @@ export interface Run {
   createdAt: string;
 }
 export interface Settings {
-  provider: "deepseek";
+  provider: "deepseek" | "openrouter";
   model: string;
   apiKey?: string;
   writingInstructions: string;
@@ -103,7 +103,7 @@ export interface Workspace {
   nodes: GraphNode[];
   edges: GraphEdge[];
   stats: { sources: number; passages: number; nodes: number; edges: number; characters: number; pages: number };
-  settings: { provider: string; model: string; connected: boolean; writingInstructions: string };
+  settings: { provider: Settings["provider"]; model: string; connected: boolean; writingInstructions: string };
   drafts: Draft[];
   runs: Run[];
   warnings: string[];

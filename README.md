@@ -6,7 +6,7 @@ A private, shared workspace for connected knowledge, cited research, and evidenc
 
 - Interactive brain graph with extracted, inferred, and ambiguous relationships.
 - Ranked passage search with exact source, page, and line references.
-- Optional DeepSeek synthesis with citation checks and a separate source-support review.
+- Optional OpenRouter or direct DeepSeek synthesis with citation checks and a separate source-support review.
 - Shared article drafts, revision conflict protection, Markdown export, and research workflows.
 - Owner and member accounts, authenticated source access, and private cloud storage.
 - PDF, Word, Markdown, text, and Graphify JSON imports.
@@ -41,7 +41,7 @@ This creates the ignored `private/corpus.json`. The importer preserves source te
 4. Upload the local corpus with `npm run publish:library` after pulling the storage environment locally. It uploads directly to private Blob, never to GitHub or a public URL.
 5. Deploy with `vercel --prod` and verify sign-in, source retrieval, and member permissions.
 
-The application deliberately refuses production writes without private cloud storage. DeepSeek can be configured in owner-only Settings; the API key is encrypted before storage. Until a model is connected, the app returns retrieved evidence and evidence outlines, labeled accordingly.
+The application deliberately refuses production writes without private cloud storage. Configure the API provider in owner-only Settings; these settings are shared by both accounts and the API key is encrypted before storage. Choose **OpenRouter** for OpenRouter keys/credits, with model ID `deepseek/deepseek-v4.1-flash-1017`, or **DeepSeek** for a direct DeepSeek key, with model ID `deepseek-flash`. Keys and balances are not interchangeable. Both generation and evidence review use the selected provider. Until a model is connected, the app returns retrieved evidence and evidence outlines, labeled accordingly. A saved key alone does not confirm successful authentication.
 
 ## Verification
 
