@@ -58,6 +58,7 @@ test("real generation and evidence-review calls use the same provider and preser
       assert.ok(calls.every(c=>c.body.model===settings.model));
       assert.ok(calls.every(c=>c.options.headers.Authorization==='Bearer '+settings.apiKey));
       assert.ok(calls[0].body.messages[0].content.includes(settings.writingInstructions));
+      assert.ok(calls[0].body.messages[0].content.includes('Format the article in clean Markdown'));
       assert.ok(calls[0].body.messages[0].content.includes('Use ONLY the supplied excerpts'));
       assert.ok(calls[1].body.messages[0].content.includes('skeptical evidence reviewer'));
     }

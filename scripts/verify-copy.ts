@@ -22,25 +22,48 @@ async function main() {
       const readClipboard = () => page.evaluate(async () => (await navigator.clipboard.readText()).replace(/\r\n/g, "\n"));
       assert.ok(original.trim(), "A saved article is required for this read-only copy check");
       await page.getByRole("button", { name: "Copy article", exact: true }).click();
-      await expect(page.getByRole("status")).toContainText("Article copied to clipboard.");
-      assert.ok(await readClipboard() === original, "Copied article content does not match the editor");
-      const edited = original + "\n\nUnsaved clipboard verification edit.";
+      await expect(page.getByRole("status")).toContainText("Article copied with formatting.");
+      assert.ok((await readClipboard()).length > 0, "Copied article is empty");
+      const edited = "# A beautifully formatted ARTICLE\n\nThis has **BOLD WORDING** and carefully spaced paragraphs.\n\n## A clear section\n\nAnother paragraph, with *gentle emphasis*.\n\n- First point\n- Second point\n\n> A thoughtful quotation.\n\n<script>window.clipboardUnsafe=true</script>";
       await editor.fill(edited);
       await page.getByRole("button", { name: "Copy article", exact: true }).click();
-      await expect.poll(async () => await readClipboard() === edited).toBe(true);
+      await expect.poll(async () => (await readClipboard()).includes("BOLD WORDING")).toBe(true);
+      const rich = await page.evaluate(async () => {
+        const items = await navigator.clipboard.read();
+        const item = items.find(item => item.types.includes("text/html"));
+        if (!item) return { rich: false };
+        const document = new DOMParser().parseFromString(await (await item.getType("text/html")).text(), "text/html");
+        return { rich: true, heading: document.querySelector("h1")?.textContent, bold: document.querySelector("strong")?.textContent,
+          section: document.querySelector("h2")?.textContent, paragraphs: document.querySelectorAll("p").length,
+          paragraphSpacing: document.querySelector("p")?.style.marginBottom, lineHeight: document.querySelector("article")?.style.lineHeight,
+          listItems: document.querySelectorAll("li").length, quote: Boolean(document.querySelector("blockquote")), scripts: document.querySelectorAll("script").length };
+      });
+      assert.equal(rich.rich, true);
+      assert.equal(rich.heading, "A beautifully formatted ARTICLE");
+      assert.equal(rich.bold, "BOLD WORDING");
+      assert.equal(rich.section, "A clear section");
+      assert.ok(Number(rich.paragraphs) >= 2);
+      assert.ok(rich.paragraphSpacing);
+      assert.equal(rich.lineHeight, "1.75");
+      assert.equal(rich.listItems, 2);
+      assert.equal(rich.quote, true);
+      assert.equal(rich.scripts, 0);
+      assert.ok(!(await readClipboard()).includes("**"), "Plain-text fallback should not contain Markdown emphasis markers");
       await editor.fill("");
       await expect(page.getByRole("button", { name: "Copy article", exact: true })).toBeDisabled();
       await editor.fill(original);
       await page.getByRole("button", { name: "Preview", exact: true }).click();
       await page.getByRole("button", { name: "Copy article", exact: true }).click();
-      await expect.poll(async () => await readClipboard() === original).toBe(true);
+      const previewText = (await page.locator(".draft-preview .article-prose").innerText()).replace(/\r\n/g, "\n").trim();
+      await expect.poll(async () => await readClipboard() === previewText).toBe(true);
       await page.setViewportSize({ width: 390, height: 844 });
       await page.getByRole("button", { name: "Copy article", exact: true }).scrollIntoViewIfNeeded();
       await expect(page.getByRole("button", { name: "Copy article", exact: true })).toBeVisible();
-      await page.evaluate(() => { navigator.clipboard.writeText = async () => { throw new DOMException("Blocked", "NotAllowedError"); }; });
+      await page.screenshot({ path: `test-results/article-preview-${name.toLowerCase()}.png`, fullPage: true });
+      await page.evaluate(() => { navigator.clipboard.write = async () => { throw new DOMException("Blocked", "NotAllowedError"); }; });
       await page.getByRole("button", { name: "Copy article", exact: true }).click();
       await expect(page.locator(".error-banner[role=alert]")).toContainText("Clipboard access was blocked.");
-      console.log(`PASS: ${name} can copy saved and unsaved article text, including from preview and on mobile. Empty articles disable copying; denied permission shows a helpful error. No edits saved.`);
+      console.log(`PASS: ${name} can copy styled articles with bold, capitalization, headings, paragraph spacing, lists and quotes; preview/mobile and blocked-permission checks passed. No edits saved.`);
       await context.close();
     }
   } finally { await browser.close(); }
