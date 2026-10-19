@@ -4,7 +4,7 @@ import { workspace, ask, createDraft, runWorkflow } from "@/lib/workspace";
 import { getCorpus } from "@/lib/corpus";
 import { saveSettings } from "@/lib/model";
 import { importFile } from "@/lib/import";
-import { updateRecord, readOriginal } from "@/lib/storage";
+import { updateRecord, readOriginal, ConflictError } from "@/lib/storage";
 import type { Draft } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -82,6 +82,7 @@ async function handle(request: Request, context: Context) {
   } catch (error) {
     if (error instanceof z.ZodError) return json({ error: error.issues[0]?.message || "Check the request fields." }, 400);
     if (error instanceof HttpError) return json({ error: error.message }, error.status);
+    if (error instanceof ConflictError) return json({ error: error.message }, 409);
     if (error instanceof SyntaxError) return json({ error: "The request contained invalid JSON." }, 400);
     console.error("Workspace operation failed:", error instanceof Error ? error.name + ": " + error.message.replace(/Bearer\s+\S+/gi, "Bearer [redacted]") : "Unknown error");
     return json({ error: "The workspace could not complete this action. Check the private storage connection and try again." }, 503);

@@ -16,7 +16,7 @@ function safeKey(key: string) {
 export async function readRecord<T>(key: string): Promise<{ value: T; etag: string } | null> {
   const full = safeKey(key);
   if (isCloud()) {
-    const result = await get(full, { access: "private", useCache: false });
+    const result = await get(full, { access: "private", useCache: false, headers: { "accept-encoding": "identity", "cache-control": "no-cache" } });
     if (!result || result.statusCode !== 200) return null;
     return { value: await new Response(result.stream).json() as T, etag: result.blob.etag };
   }
@@ -35,7 +35,7 @@ export async function writeRecord<T>(key: string, value: T, expectedEtag?: strin
   const text = JSON.stringify(value);
   if (isCloud()) {
     await put(full, text, { access: "private", contentType: "application/json", addRandomSuffix: false,
-      ...(expectedEtag ? { ifMatch: expectedEtag } : {}) });
+      ...(expectedEtag ? { ifMatch: expectedEtag, allowOverwrite: true } : {}) });
     return;
   }
   if (process.env.VERCEL) throw new Error("Private cloud storage is not connected. No changes were saved.");
@@ -82,6 +82,7 @@ export async function updateRecord<T>(key: string, initial: T, mutate: (value: T
       try { await writeRecord(key, next, current?.etag ?? null); return next; }
       catch (error) {
         if (!(error instanceof BlobPreconditionFailedError) && !(error instanceof ConflictError) && !String(error).includes("already exists")) throw error;
+        console.warn("Private storage retry", { key, attempt, hasEtag: Boolean(current?.etag), weakEtag: current?.etag.startsWith("W/"), errorType: error instanceof Error ? error.name : "Unknown" });
         if (attempt === 3) throw new ConflictError("Someone else updated this item. Please reload and try again.");
       }
     }
