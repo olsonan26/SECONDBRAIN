@@ -8,6 +8,7 @@ A private, shared workspace for connected knowledge, cited research, and evidenc
 - Ranked passage search with exact source, page, and line references.
 - Optional OpenRouter or direct DeepSeek synthesis with citation checks and a separate source-support review.
 - Shared article drafts, revision conflict protection, styled editorial previews, rich-text copying with bold/headings/spacing (including unsaved edits), Markdown export, and research workflows. Clipboard formatting is preserved in compatible rich-text destinations; plain-text apps receive readable text instead.
+- Blog drafts have generated, source-checked headlines and self-contained prose. Citation mappings remain in the separate review section, not the reader-facing body or copy/export. Older model drafts receive a non-destructive clean presentation; outlines remain labeled as research outlines.
 - Owner and member accounts, authenticated source access, and private cloud storage.
 - PDF, Word, Markdown, text, and Graphify JSON imports.
 

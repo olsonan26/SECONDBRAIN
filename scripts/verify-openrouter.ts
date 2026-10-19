@@ -2,6 +2,7 @@ import { chromium, expect, type BrowserContext } from "@playwright/test";
 import { readFileSync, existsSync } from "node:fs";
 import assert from "node:assert/strict";
 import { OPENROUTER_MODEL } from "../src/lib/model-provider";
+import { hasResearchPhrasing } from "../src/lib/article-presentation";
 
 const origin = process.argv[2] || "http://127.0.0.1:3101";
 const activate = process.argv.includes("--activate-openrouter");
@@ -70,7 +71,13 @@ async function main() {
       const draft = await draftHttp.json();
       assert.equal(draftHttp.status(), 200, `Draft failed: ${JSON.stringify(draft)}`);
       assert.equal(draft.mode, "model");
-      await expect(page.getByLabel("Article draft", { exact: true })).toHaveValue(draft.text);
+      assert.notEqual(draft.title, draft.brief);
+      assert.ok(draft.evidenceMap.length > 0);
+      assert.doesNotMatch(draft.text, /\[\d+\]|AI-written draft/);
+      assert.equal(hasResearchPhrasing(draft.text), false);
+      await expect(page.locator(".draft-preview .article-prose h1")).toHaveText(draft.title);
+      await expect(page.locator(".editor-citations")).not.toHaveAttribute("open");
+      await page.locator(".draft-preview").screenshot({ path: "test-results/blog-article-live.png" });
       console.log(`PASS: live article generation passed evidence review and persisted with ${draft.citations.length} citations.`);
     }
     const peter = await browser.newContext({ viewport: { width: 1440, height: 1000 } });

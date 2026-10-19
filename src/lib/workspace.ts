@@ -6,13 +6,14 @@ import { retrieve, extractiveText, tokens } from "./search";
 import { getSettings, publicSettings, generateGrounded } from "./model";
 import { isCloud, listRecords, writeRecord } from "./storage";
 import { HttpError } from "./auth";
+import { presentDraft } from "./article-presentation";
 
 export async function workspace(user: Workspace["user"]): Promise<Workspace> {
   const [corpus, settings, drafts, runs] = await Promise.all([getCorpus(), getSettings(), listRecords<Draft>("drafts"), listRecords<Run>("runs")]);
   return { user, sources: corpus.sources.map(({ content, ...source }) => source), nodes: corpus.nodes, edges: corpus.edges,
     stats: { sources: corpus.sources.length, passages: corpus.passages.length, nodes: corpus.nodes.length, edges: corpus.edges.length,
       characters: corpus.sources.reduce((n, s) => n + s.characters, 0), pages: corpus.sources.reduce((n, s) => n + s.pages, 0) },
-    settings: publicSettings(settings), drafts: drafts.sort((a,b) => b.updatedAt.localeCompare(a.updatedAt)), runs: runs.sort((a,b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 50),
+    settings: publicSettings(settings), drafts: drafts.map(presentDraft).sort((a,b) => b.updatedAt.localeCompare(a.updatedAt)), runs: runs.sort((a,b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 50),
     warnings: corpus.warnings, snapshotDate: corpus.snapshotDate, importedAt: corpus.importedAt, persistence: isCloud() ? "cloud" : "local" };
 }
 
@@ -45,12 +46,13 @@ export async function createDraft(brief: string, title: string | undefined, sour
   if (!citations.length) throw new HttpError(422, "No supporting passages were found for this brief. Add a specific topic or choose relevant sources first.");
   let text = `# ${title || brief}\n\n## Editorial brief\n\n${brief}\n\n## Evidence to build on\n\n${extractiveText(citations)}\n\n## Suggested structure\n\n- Introduce the question using the source evidence.\n- Develop the central ideas, with citations for each factual paragraph.\n- Explain connections while distinguishing source statements from interpretation.\n- Close with what the sources support and the questions they leave open.\n\n*Evidence outline: connect a model to generate article prose, then review it before publication.*`;
   let mode: Draft["mode"] = "extractive", actualTitle = title || brief;
+  let evidenceMap: Draft["evidenceMap"];
   if (settings.apiKey) {
     const generated = await generateGrounded(brief, citations, settings, true);
-    if (generated) { text = `# ${actualTitle}\n\n${generated.text}\n\n*AI-written draft: review the cited source passages before publication.*`; mode = "model"; }
+    if (generated) { actualTitle = title || generated.title || actualTitle; text = generated.text; evidenceMap = generated.evidenceMap; mode = "model"; }
   }
   const draft: Draft = { id: randomUUID(), title: actualTitle.slice(0, 180), brief, text,
-    status: mode === "model" ? "draft" : "outline", citations, author, updatedAt: new Date().toISOString(), revision: 1, mode };
+    status: mode === "model" ? "draft" : "outline", citations, evidenceMap, author, updatedAt: new Date().toISOString(), revision: 1, mode };
   await writeRecord(`drafts/${draft.id}.json`, draft);
   return draft;
 }

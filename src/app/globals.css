@@ -29,3 +29,6 @@
 .draft-preview .article-prose{max-width:70ch;margin:0 auto;background:#fff;padding:clamp(20px,4vw,48px);box-shadow:0 5px 24px #0b203014;border:1px solid #dce6ec;border-radius:3px}
 .article-prose>*:last-child{margin-bottom:0!important}
 @media(max-width:600px){.draft-preview .article-prose{font-size:11pt!important}.draft-preview .article-prose h1{font-size:22pt!important}.article-prose table{display:block;overflow-x:auto}}
+.editor-citations>summary{cursor:pointer;color:#a9c1d8;font-size:11px;padding:4px 0;list-style-position:inside}
+.editor-citations[open]>summary{margin-bottom:10px}
+.editor-citations>.citations{margin-top:16px}

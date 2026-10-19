@@ -79,6 +79,7 @@ export interface Draft {
   updatedAt: string;
   revision: number;
   mode: "extractive" | "model";
+  evidenceMap?: { paragraphIndex: number; citations: number[] }[];
 }
 export interface Run {
   id: string;

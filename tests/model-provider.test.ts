@@ -44,23 +44,35 @@ test("real generation and evidence-review calls use the same provider and preser
     const {generateGrounded} = module.default || module;
     const citation = {number:1,id:'p1',sourceId:'s1',sourceTitle:'Test notes',page:1,section:'',lineStart:1,lineEnd:1,text:'The notes describe a period of reflection and study.',score:1};
     for (const provider of ['openrouter','deepseek']) {
-      const calls=[];
+      const calls=[]; let rejectHeadline=false;
       globalThis.fetch=async (url,options)=> {
         calls.push({url,options,body:JSON.parse(options.body)});
-        const value = calls.length===1 ? {paragraphs:[{text:'The notes describe reflection and study.',citations:[1],evidence:[{citation:1,quote:'a period of reflection and study'}]}]} : {checks:[{index:0,supported:true}]};
+        const value = calls.length===1 ? {title:'Reflection and Study',paragraphs:[{text:'A period of reflection invites study.',citations:[1],evidence:[{citation:1,quote:'a period of reflection and study'}]}]} : {checks:JSON.parse(JSON.parse(options.body).messages[1].content).paragraphs.map(p=>({index:p.index,supported:!(rejectHeadline && p.index===1)}))};
         return Response.json({choices:[{message:{content:JSON.stringify(value)}}]});
       };
       const settings={provider,model:provider==='openrouter'?'deepseek/deepseek-v4.1-flash-1017':'deepseek-flash',apiKey:provider==='openrouter'?'sk-or-test-placeholder':'sk-test-placeholder',writingInstructions:'Specific editorial rule for integration testing.'};
       const output=await generateGrounded('Explain the notes', [citation], settings, true);
-      assert.match(output.text,/\\[1\\]/);
+      assert.equal(output.title,'Reflection and Study');
+      assert.doesNotMatch(output.text,/\\[1\\]/);
+      assert.deepEqual(output.evidenceMap,[{paragraphIndex:0,citations:[1]}]);
       assert.equal(calls.length,2);
       assert.ok(calls.every(c=>c.url===(provider==='openrouter'?'https://openrouter.ai/api/v1/chat/completions':'https://api.deepseek.com/chat/completions')));
       assert.ok(calls.every(c=>c.body.model===settings.model));
       assert.ok(calls.every(c=>c.options.headers.Authorization==='Bearer '+settings.apiKey));
       assert.ok(calls[0].body.messages[0].content.includes(settings.writingInstructions));
       assert.ok(calls[0].body.messages[0].content.includes('Format the article in clean Markdown'));
+      assert.ok(calls[0].body.messages[0].content.includes('self-contained editorial voice'));
+      assert.ok(calls[0].body.messages[0].content.includes('Do not say "the source material"'));
       assert.ok(calls[0].body.messages[0].content.includes('Use ONLY the supplied excerpts'));
       assert.ok(calls[1].body.messages[0].content.includes('skeptical evidence reviewer'));
+      const review=JSON.parse(calls[1].body.messages[1].content);
+      assert.equal(review.paragraphs.length,2);
+      assert.match(review.paragraphs[1].text,/Article headline: Reflection and Study/);
+      calls.length=0; rejectHeadline=true;
+      await assert.rejects(()=>generateGrounded('Explain the notes',[citation],settings,true),/source-support review/);
+      calls.length=0; rejectHeadline=false;
+      const answer=await generateGrounded('Explain the notes',[citation],settings,false);
+      assert.match(answer.text,/\\[1\\]/);
     }
   `], { encoding: "utf8", timeout: 30_000, windowsHide: true });
   assert.equal(result.status, 0, result.stderr || result.stdout);
