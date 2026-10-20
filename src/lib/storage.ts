@@ -3,6 +3,7 @@ import { get, put, list, BlobPreconditionFailedError } from "@vercel/blob";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
+import { brainKey, MAIN_BRAIN_ID } from "./brain-scope";
 
 const localRoot = () => path.join(process.cwd(), "private");
 export const isCloud = () => Boolean(process.env.BLOB_READ_WRITE_TOKEN || process.env.BLOB_STORE_ID);
@@ -52,19 +53,19 @@ export async function writeRecord<T>(key: string, value: T, expectedEtag?: strin
 
 export class ConflictError extends Error {}
 
-export async function writeOriginal(id: string, format: string, bytes: Buffer) {
-  const key = `originals/${id}.${format}`; safeKey(key);
+export async function writeOriginal(id: string, format: string, bytes: Buffer, brainId = MAIN_BRAIN_ID) {
+  const key = brainKey(brainId, `originals/${id}.${format}`); safeKey(key);
   if (isCloud()) {
     await put(safeKey(key), bytes, { access: "private", addRandomSuffix: false, contentType: "application/octet-stream" });
   } else {
     if (process.env.VERCEL) throw new Error("Private cloud storage is not connected.");
-    await fs.mkdir(path.join(localRoot(), "originals"), { recursive: true });
+    await fs.mkdir(path.dirname(path.join(localRoot(), key)), { recursive: true });
     await fs.writeFile(path.join(localRoot(), key), bytes, { mode: 0o600 });
   }
 }
 
-export async function readOriginal(id: string, format: string): Promise<ReadableStream<Uint8Array> | Uint8Array | null> {
-  const key = `originals/${id}.${format}`; safeKey(key);
+export async function readOriginal(id: string, format: string, brainId = MAIN_BRAIN_ID): Promise<ReadableStream<Uint8Array> | Uint8Array | null> {
+  const key = brainKey(brainId, `originals/${id}.${format}`); safeKey(key);
   if (isCloud()) {
     const result = await get(safeKey(key), { access: "private" });
     return result?.statusCode === 200 ? result.stream : null;

@@ -32,7 +32,7 @@ async function main() {
     await page.getByRole("button", { name: "Enter your workspace" }).click();
     await expect(page.locator("canvas")).toBeVisible({ timeout: 30_000 });
     const before = (await workspace(alex)).settings;
-    await page.locator(".workspace-switch").click();
+    await page.locator(".settings-nav").click();
     await expect(page.getByLabel("API provider", { exact: true })).toBeEnabled();
     await expect(page.getByLabel("Writing guidance", { exact: true })).toHaveValue(before.writingInstructions);
     await page.getByLabel("API provider", { exact: true }).selectOption("openrouter");
@@ -41,7 +41,7 @@ async function main() {
     await expect(page.getByLabel("OpenRouter API key", { exact: true })).toBeVisible();
     console.log("PASS: owner provider selector, model field, and saved writing guidance render correctly.");
     if (activate) {
-      const saved = page.waitForResponse(r => r.url().endsWith("/api/settings") && r.request().method() === "POST");
+      const saved = page.waitForResponse(r => new URL(r.url()).pathname === "/api/settings" && r.request().method() === "POST");
       await page.getByRole("button", { name: "Save settings", exact: true }).click();
       assert.equal((await saved).status(), 200, "Provider settings could not be saved");
       const after = (await workspace(alex)).settings;
@@ -53,7 +53,7 @@ async function main() {
       console.log("PASS: shared OpenRouter settings persisted without replacing the key or writing rules.");
       await page.getByRole("button", { name: "Ask your knowledge", exact: true }).click();
       await page.getByLabel("Your question", { exact: true }).fill("What is a personal year?");
-      const answerResponse = page.waitForResponse(r => r.url().endsWith("/api/ask"), { timeout: 125_000 });
+      const answerResponse = page.waitForResponse(r => new URL(r.url()).pathname === "/api/ask", { timeout: 125_000 });
       await page.getByRole("button", { name: "Ask the brain", exact: true }).click();
       const answer = await (await answerResponse).json();
       assert.equal(answer.mode, "model", `AI answer did not complete: ${JSON.stringify(answer.warnings)}`);
@@ -65,7 +65,7 @@ async function main() {
       console.log(`PASS: live OpenRouter answer passed citation and evidence review; ${answer.citations.length} citations open in the browser.`);
       await page.getByRole("button", { name: "Writing studio", exact: true }).click();
       await page.getByLabel("What are we writing?", { exact: true }).fill("Write a short article about personal year 7, reflection and study.");
-      const draftResponse = page.waitForResponse(r => r.url().endsWith("/api/drafts") && r.request().method() === "POST", { timeout: 125_000 });
+      const draftResponse = page.waitForResponse(r => new URL(r.url()).pathname === "/api/drafts" && r.request().method() === "POST", { timeout: 125_000 });
       await page.getByRole("button", { name: "Create source-based draft", exact: true }).click();
       const draftHttp = await draftResponse;
       const draft = await draftHttp.json();
@@ -93,7 +93,7 @@ async function main() {
     }
     const memberPage = await peter.newPage();
     await memberPage.goto(origin);
-    await memberPage.locator(".workspace-switch").click();
+    await memberPage.locator(".settings-nav").click();
     await expect(memberPage.getByLabel("API provider", { exact: true })).toBeDisabled();
     console.log("PASS: Peter sees the shared settings but cannot change the provider.");
     assert.deepEqual(errors, []);

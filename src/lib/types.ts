@@ -1,6 +1,14 @@
 export type Confidence = "EXTRACTED" | "INFERRED" | "AMBIGUOUS";
 export type Layer = "advanced" | "foundation" | "uploaded";
 
+export interface Brain {
+  id: string;
+  name: string;
+  description: string;
+  createdAt: string;
+  createdBy: string;
+}
+
 export interface Source {
   id: string;
   title: string;
@@ -99,6 +107,8 @@ export interface Settings {
   writingInstructions: string;
 }
 export interface Workspace {
+  brain: Brain;
+  brains: Brain[];
   user: { name: string; role: "owner" | "member" };
   sources: Source[];
   nodes: GraphNode[];

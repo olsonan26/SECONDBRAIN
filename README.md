@@ -12,6 +12,14 @@ A private, shared workspace for connected knowledge, cited research, and evidenc
 - Owner and member accounts, authenticated source access, and private cloud storage.
 - PDF, Word, Markdown, text, and Graphify JSON imports.
 
+## Separate brains
+
+Use the **Active brain** selector to switch libraries. The **+** button lets the owner create a brain (for example, Astrology); new brains start empty and are shared with Peter. Import files only after selecting the intended brain. Each brain has separate source text, passages, graph, original uploads, drafts, and workflow history. Questions and article generation search only that brain; an empty brain never falls back to another library. Model credentials and writing guidance remain shared workspace settings.
+
+The original library remains in **Main brain**, using its existing private storage paths without moving or rewriting the data. New brains use independent UUID-based storage namespaces. `?brain=<id>` URLs can be bookmarked/shared; sign-in preserves the selected brain, and switching warns about unsaved article edits and clears the previous brain's client state. The public repository still contains no private knowledge or credentials.
+
+Brain data API calls carry `?brain=<id>` too. Omitting it retains the legacy Main brain behavior; invalid, unknown, or duplicate brain parameters fail closed. Original downloads and draft revision writes are checked within the same selected namespace.
+
 The public repository contains application code only. Documents, generated indexes, uploaded originals, credentials, and test artifacts are excluded from Git and deployment uploads.
 
 ## Local setup

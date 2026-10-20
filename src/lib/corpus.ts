@@ -1,13 +1,17 @@
 import "server-only";
 import type { Corpus } from "./types";
 import { readRecord } from "./storage";
+import { brainKey, MAIN_BRAIN_ID } from "./brain-scope";
 
-let cached: { value: Corpus; at: number } | null = null;
-export function invalidateCorpus() { cached = null; }
-export async function getCorpus(): Promise<Corpus> {
+const cache = new Map<string, { value: Corpus; at: number }>();
+export function invalidateCorpus(brainId = MAIN_BRAIN_ID) { cache.delete(brainId); }
+export async function getCorpus(brainId = MAIN_BRAIN_ID): Promise<Corpus> {
+  const key = brainKey(brainId, "corpus.json");
+  const cached = cache.get(brainId);
   if (cached && Date.now() - cached.at < 15_000) return cached.value;
-  const record = await readRecord<Corpus>("corpus.json");
-  const value = record?.value ?? { version: 1, importedAt: "", snapshotDate: "", sources: [], passages: [], nodes: [], edges: [], warnings: ["Your private library has not been imported yet. Import a source or connect private storage."] };
-  cached = { value, at: Date.now() };
+  const record = await readRecord<Corpus>(key);
+  const value = record?.value ?? { version: 1, importedAt: "", snapshotDate: "", sources: [], passages: [], nodes: [], edges: [], warnings: ["This brain has no sources yet. Import knowledge into this brain to enable search and writing."] };
+  if (cache.size >= 50) cache.delete(cache.keys().next().value!);
+  cache.set(brainId, { value, at: Date.now() });
   return value;
 }

@@ -7,13 +7,14 @@ import { HttpError } from "./auth";
 import { updateRecord, writeOriginal } from "./storage";
 import { invalidateCorpus, getCorpus } from "./corpus";
 import { createPassages } from "../../scripts/import-brain";
+import { brainKey, MAIN_BRAIN_ID } from "./brain-scope";
 
-export async function importFile(file: File) {
+export async function importFile(file: File, brainId = MAIN_BRAIN_ID) {
   if (file.size > 4_000_000) throw new HttpError(413, "This upload is over 4 MB. Split the document into smaller files first.");
   const bytes = Buffer.from(await file.arrayBuffer());
   const filename = file.name.replace(/[\\/\x00-\x1f]/g, "_").slice(0, 220);
   const ext = filename.split(".").pop()?.toLowerCase();
-  if (ext === "json") return importGraph(JSON.parse(bytes.toString("utf8")));
+  if (ext === "json") return importGraph(JSON.parse(bytes.toString("utf8")), brainId);
   let content: string;
   if (ext === "pdf") {
     const parsed = await extractText(new Uint8Array(bytes), { mergePages: false });
@@ -28,23 +29,23 @@ export async function importFile(file: File) {
     characters: content.length, pages: [...content.matchAll(/^#{1,6}\s+Page\s+\d+/gmi)].length,
     sha256, importedAt: new Date().toISOString(), provenance: "Uploaded directly to this workspace; text extracted locally by the server.", originalAvailable: true, content };
   const passages = createPassages(source, content);
-  const fallback = await getCorpus();
+  const fallback = await getCorpus(brainId);
   if (fallback.sources.some(s => s.sha256 === sha256)) throw new HttpError(409, "This exact source is already in your library.");
-  await writeOriginal(source.id, source.format, bytes);
-  const updated = await updateRecord<Corpus>("corpus.json", fallback, corpus => {
+  await writeOriginal(source.id, source.format, bytes, brainId);
+  const updated = await updateRecord<Corpus>(brainKey(brainId, "corpus.json"), fallback, corpus => {
     if (corpus.sources.some(s => s.sha256 === sha256)) throw new HttpError(409, "This exact source is already in your library.");
     const docNode: GraphNode = { id: `source:${source.id}`, label: source.title, type: "document", layer: "uploaded", community: "Your uploads", sourceIds: [source.id], description: "Source document. Import a concept graph to add semantic relationships.", degree: 0 };
     return { ...corpus, sources: [...corpus.sources, source], passages: [...corpus.passages, ...passages], nodes: [...corpus.nodes, docNode], importedAt: source.importedAt };
   });
-  invalidateCorpus();
+  invalidateCorpus(brainId);
   return { source: { ...source, content: undefined }, passages: passages.length, totalSources: updated.sources.length };
 }
 
-async function importGraph(input: unknown) {
+async function importGraph(input: unknown, brainId: string) {
   const data = input as { nodes?: unknown[]; links?: unknown[]; edges?: unknown[] };
   if (!Array.isArray(data?.nodes) || data.nodes.length > 10_000 || !Array.isArray(data.links ?? data.edges)) throw new HttpError(422, "Choose a Graphify graph.json export with nodes and links.");
   const prefix = `graph-${randomUUID().slice(0, 8)}:`;
-  const corpus = await getCorpus();
+  const corpus = await getCorpus(brainId);
   const map = new Map<string, string>();
   const sourceIds = (file: unknown) => typeof file === "string" ? corpus.sources.filter(s => file.replace(/\\/g,"/").toLowerCase().includes(s.filename.toLowerCase().replace(/\.(pdf|txt|docx|md)$/i,""))).map(s => s.id) : [];
   const nodes: GraphNode[] = data.nodes.map((raw: unknown) => {
@@ -57,6 +58,6 @@ async function importGraph(input: unknown) {
       score: typeof e.confidence_score === "number" ? Math.max(0, Math.min(1,e.confidence_score)) : e.confidence === "EXTRACTED" ? 1 : 0.2, sourceIds: sourceIds(e.source_file) } satisfies GraphEdge];
   });
   const degree = new Map<string, number>(); for(const e of edges){degree.set(e.source,(degree.get(e.source) ?? 0)+1);degree.set(e.target,(degree.get(e.target) ?? 0)+1);} for(const n of nodes)n.degree=degree.get(n.id) ?? 0;
-  await updateRecord<Corpus>("corpus.json", corpus, old => ({ ...old, nodes: [...old.nodes, ...nodes], edges: [...old.edges, ...edges] }));
-  invalidateCorpus(); return { nodes: nodes.length, edges: edges.length, warning: "Graph imported. Source documents must also be present for passage-level answers." };
+  await updateRecord<Corpus>(brainKey(brainId, "corpus.json"), corpus, old => ({ ...old, nodes: [...old.nodes, ...nodes], edges: [...old.edges, ...edges] }));
+  invalidateCorpus(brainId); return { nodes: nodes.length, edges: edges.length, warning: "Graph imported. Source documents must also be present for passage-level answers." };
 }

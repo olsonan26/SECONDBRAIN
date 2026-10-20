@@ -6,6 +6,8 @@ import { saveSettings } from "@/lib/model";
 import { importFile } from "@/lib/import";
 import { updateRecord, readOriginal, ConflictError } from "@/lib/storage";
 import type { Draft } from "@/lib/types";
+import { listBrains, createBrain, requireBrain } from "@/lib/brains";
+import { brainKey, MAIN_BRAIN_ID } from "@/lib/brain-scope";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -28,34 +30,44 @@ async function handle(request: Request, context: Context) {
     }
     const user = await requireUser();
     if (route === "auth/logout" && request.method === "POST") { const session = await getSession(); session.destroy(); return json({ ok: true }); }
-    if (route === "workspace" && request.method === "GET") return json(await workspace(user));
+    if (route === "brains" && request.method === "GET") return json(await listBrains());
+    if (route === "brains" && request.method === "POST") {
+      await requireUser(true);
+      const input = z.object({ name: z.string().trim().min(1).max(60), description: z.string().trim().max(240).default("") }).parse(await body(request));
+      return json(await createBrain(input.name, input.description, user.name), 201);
+    }
+    const brainParams = new URL(request.url).searchParams;
+    if (brainParams.getAll("brain").length > 1) throw new HttpError(400, "Choose one active brain per request.");
+    const brainId = brainParams.get("brain") ?? MAIN_BRAIN_ID;
+    await requireBrain(brainId);
+    if (route === "workspace" && request.method === "GET") return json(await workspace(user, brainId));
     if (route === "source" && request.method === "GET") {
-      const id = new URL(request.url).searchParams.get("id"), corpus = await getCorpus();
+      const id = new URL(request.url).searchParams.get("id"), corpus = await getCorpus(brainId);
       const source = corpus.sources.find(s => s.id === id); if (!source) throw new HttpError(404, "Source not found."); return json(source);
     }
     if (route === "original" && request.method === "GET") {
-      const id = new URL(request.url).searchParams.get("id"), corpus = await getCorpus();
+      const id = new URL(request.url).searchParams.get("id"), corpus = await getCorpus(brainId);
       const source = corpus.sources.find(s => s.id === id);
       if (!source || !source.originalAvailable) throw new HttpError(404, "Original bytes are not available for this recovered source. Its extracted text is available in the library.");
-      const original = await readOriginal(source.id, source.format);
+      const original = await readOriginal(source.id, source.format, brainId);
       if (!original) throw new HttpError(404, "Original file not found.");
       return new Response(original as BodyInit, { headers: { "Content-Type": "application/octet-stream", "Cache-Control": "private, no-store", "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(source.filename)}` } });
     }
     if (route === "passage" && request.method === "GET") {
-      const id = new URL(request.url).searchParams.get("id"), corpus = await getCorpus();
+      const id = new URL(request.url).searchParams.get("id"), corpus = await getCorpus(brainId);
       const passage = corpus.passages.find(s => s.id === id); if (!passage) throw new HttpError(404, "Passage not found."); return json({ ...passage, terms: undefined });
     }
     if (route === "ask" && request.method === "POST") {
       const input = z.object({ question: questionSchema, sourceIds: scopeSchema }).parse(await body(request));
-      return json(await ask(input.question, input.sourceIds));
+      return json(await ask(input.question, input.sourceIds, brainId));
     }
     if (route === "drafts" && request.method === "POST") {
       const input = z.object({ brief: questionSchema, title: z.string().trim().max(180).optional(), sourceIds: scopeSchema }).parse(await body(request));
-      return json(await createDraft(input.brief, input.title, input.sourceIds, user.name));
+      return json(await createDraft(input.brief, input.title, input.sourceIds, user.name, brainId));
     }
     if (route === "drafts" && request.method === "PATCH") {
       const input = z.object({ id: z.string().uuid(), text: z.string().max(80_000), title: z.string().trim().min(1).max(180), status: z.enum(["outline", "draft", "reviewed"]), revision: z.number().int().min(1) }).parse(await body(request));
-      const draft = await updateRecord<Draft | null>(`drafts/${input.id}.json`, null, old => {
+      const draft = await updateRecord<Draft | null>(brainKey(brainId, `drafts/${input.id}.json`), null, old => {
         if (!old) throw new HttpError(404, "Draft not found.");
         if (old.revision !== input.revision) throw new HttpError(409, "This draft was changed by someone else. Reload the workspace before saving.");
         return { ...old, title: input.title, text: input.text, status: input.status, revision: old.revision + 1, updatedAt: new Date().toISOString() };
@@ -64,7 +76,7 @@ async function handle(request: Request, context: Context) {
     if (route === "workflows" && request.method === "POST") {
       const input = z.object({ kind: z.enum(["research-brief", "article-plan", "connection-map", "knowledge-audit"]), question: z.string().trim().max(3000).default(""), sourceIds: scopeSchema }).parse(await body(request));
       if (input.kind !== "knowledge-audit" && input.question.length < 3) throw new HttpError(400, "Add a topic or question for this workflow.");
-      return json(await runWorkflow(input.kind, input.question, input.sourceIds, user.name));
+      return json(await runWorkflow(input.kind, input.question, input.sourceIds, user.name, brainId));
     }
     if (route === "settings" && request.method === "POST") {
       await requireUser(true);
@@ -76,7 +88,7 @@ async function handle(request: Request, context: Context) {
       if (Number(request.headers.get("content-length") ?? 0) > 4_100_000) throw new HttpError(413, "Choose a file under 4 MB.");
       const data = await request.formData(), file = data.get("file");
       if (!(file instanceof File)) throw new HttpError(400, "Choose a file to import.");
-      return json(await importFile(file));
+      return json(await importFile(file, brainId));
     }
     throw new HttpError(404, "That workspace action was not found.");
   } catch (error) {
