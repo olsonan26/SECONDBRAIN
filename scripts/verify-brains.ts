@@ -90,7 +90,7 @@ async function main() {
       assert.equal(new URL(uploaded.url()).searchParams.get("brain"), id);
       assert.equal(uploaded.status(), 200);
       const source = (await uploaded.json()).source;
-      await expect(page.locator(".notice-toast")).toContainText(`imported into ${name}`);
+      await expect(page.locator(".import-feedback.success")).toContainText(`Saved in ${name}`);
       const populated = await workspace(alex, id);
       assert.equal(populated.sources.length, 1); assert.equal(populated.nodes.length, 1);
       assert.equal((await alex.request.get(`${origin}/api/source?id=${source.id}&brain=main`)).status(), 404);

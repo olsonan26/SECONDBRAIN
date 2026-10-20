@@ -8,9 +8,11 @@ import { updateRecord, writeOriginal } from "./storage";
 import { invalidateCorpus, getCorpus } from "./corpus";
 import { createPassages } from "../../scripts/import-brain";
 import { brainKey, MAIN_BRAIN_ID } from "./brain-scope";
+import { MAX_EXTRACTED_CHARACTERS, MAX_UPLOAD_BYTES, uploadValidationError } from "./import-limits";
 
 export async function importFile(file: File, brainId = MAIN_BRAIN_ID) {
-  if (file.size > 4_000_000) throw new HttpError(413, "This upload is over 4 MB. Split the document into smaller files first.");
+  const invalid = uploadValidationError(file);
+  if (invalid) throw new HttpError(file.size > MAX_UPLOAD_BYTES ? 413 : 422, invalid);
   const bytes = Buffer.from(await file.arrayBuffer());
   const filename = file.name.replace(/[\\/\x00-\x1f]/g, "_").slice(0, 220);
   const ext = filename.split(".").pop()?.toLowerCase();
@@ -23,7 +25,7 @@ export async function importFile(file: File, brainId = MAIN_BRAIN_ID) {
   else if (["txt", "md", "markdown"].includes(ext || "")) content = bytes.toString("utf8").replace(/^\uFEFF/, "");
   else throw new HttpError(415, "Choose a text, Markdown, PDF, Word .docx, or Graphify JSON file.");
   if (content.replace(/#+\s*Page\s*\d+/g, "").trim().length < 40) throw new HttpError(422, "No readable text was found. Scanned documents need OCR before import.");
-  if (content.length > 1_000_000) throw new HttpError(413, "The extracted text is too large for one import. Split the document into sections.");
+  if (content.length > MAX_EXTRACTED_CHARACTERS) throw new HttpError(413, "This document contains over 5 million characters of text. Split it into sections before importing.");
   const sha256 = createHash("sha256").update(content).digest("hex");
   const source: Source = { id: `upload-${sha256.slice(0, 20)}`, title: filename.replace(/\.[^.]+$/, ""), filename, layer: "uploaded", format: ext || "txt",
     characters: content.length, pages: [...content.matchAll(/^#{1,6}\s+Page\s+\d+/gmi)].length,
