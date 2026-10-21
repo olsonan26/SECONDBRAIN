@@ -10,10 +10,12 @@ import { getSettings } from "./model";
 import { modelConnection, modelError } from "./model-provider";
 import { listRecords, readRecord, updateRecord, writeRecord } from "./storage";
 import { applicationInstructions, extractionSchema, extractionShape, finalVerificationInstructions, finalVerificationSchema, independentlyVerifiedFragment, knowledgeInstructions, reviewSchema, reviewShape, type Extraction, type KnowledgeReview, type PassageAudit } from "./knowledge-schema";
-import { granularityInstructions, validatedEvidence } from "./knowledge-schema";
+import { granularityInstructions as teachingGranularityInstructions, processingNoteInstructions, validatedEvidence } from "./knowledge-schema";
 import { reusableKnowledgeInstructions, usefulnessVerificationInstructions } from "./knowledge-usefulness";
 import { imageMessages, imageContextCeiling } from "./knowledge-images";
 import { mergeRepeatedTeachings, mergeGraphEdges } from "./knowledge-dedup";
+
+const granularityInstructions = `${teachingGranularityInstructions}\n${processingNoteInstructions}`;
 
 const LEASE_MS = 150_000;
 const MAX_COMPLETION_TOKENS = 12_000;

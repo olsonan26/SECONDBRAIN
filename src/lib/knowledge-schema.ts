@@ -3,6 +3,16 @@ import { z } from "zod";
 import type { Corpus, GraphEdge, GraphNode, KnowledgeEvidence, KnowledgePassageAudit, Passage } from "./types";
 import { isUsefulTeaching, nonTeachingNodeReason } from "./knowledge-usefulness";
 
+// Reasons and gaps are bounded processing notes, not teachings or source evidence.
+// A verbose explanation must not force another paid extraction of valid material.
+const processingNote = (minimum = 3) => z.string().min(minimum).max(100_000).transform(value => {
+  if (value.length <= 900) return value;
+  let shortened = value.slice(0, 899);
+  if (/[\uD800-\uDBFF]$/.test(shortened)) shortened = shortened.slice(0, -1);
+  return `${shortened}…`;
+});
+export const processingNoteInstructions = "Keep every processing reason and gaps entry concise, ideally below 400 characters. Explain the decision rather than retelling the source. This brevity applies ONLY to processing notes, never to teaching coverage, required qualifications or source evidence.";
+
 export const knowledgeEvidenceSchema = z.object({ passageId: z.string().min(1).max(180), quote: z.string().max(1800).default(""), imageId: z.string().max(180).optional(), visualObservation: z.string().min(20).max(1800).optional() }).refine(value => value.quote.length >= 12 || Boolean(value.imageId && value.visualObservation), "Provide an exact source quote or a specific observation tied to the attached original image.");
 const teachingSchema = z.object({
   key: z.string().min(1).max(100), label: z.string().min(3).max(180),
@@ -15,20 +25,20 @@ const teachingSchema = z.object({
 const dispositionSchema = z.object({
   passageId: z.string().min(1).max(180),
   disposition: z.enum(["extracted", "excluded-story", "excluded-noise", "unresolved"]),
-  reason: z.string().min(3).max(900),
+  reason: processingNote(),
 });
 const relationshipSchema = z.object({
   sourceKey: z.string().min(1).max(100), targetKey: z.string().min(1).max(100),
   relation: z.string().min(2).max(140), evidence: z.array(knowledgeEvidenceSchema).min(1).max(6),
 });
-const clarificationSchema = z.object({ passageId: z.string().min(1).max(180), quote: z.string().min(12).max(1800), question: z.string().min(12).max(500), reason: z.string().min(10).max(900) });
-export const extractionSchema = z.object({ teachings: z.array(teachingSchema).max(150), relationships: z.array(relationshipSchema).max(200).default([]), passages: z.array(dispositionSchema).max(30), gaps: z.array(z.string().max(900)).max(40).default([]), clarifications: z.array(clarificationSchema).max(3).default([]) });
+const clarificationSchema = z.object({ passageId: z.string().min(1).max(180), quote: z.string().min(12).max(1800), question: z.string().min(12).max(500), reason: processingNote(10) });
+export const extractionSchema = z.object({ teachings: z.array(teachingSchema).max(150), relationships: z.array(relationshipSchema).max(200).default([]), passages: z.array(dispositionSchema).max(30), gaps: z.array(processingNote(0)).max(40).default([]), clarifications: z.array(clarificationSchema).max(3).default([]) });
 export const reviewSchema = z.object({
-  checks: z.array(z.object({ key: z.string().min(1).max(100), supported: z.boolean(), reason: z.string().min(3).max(900) })).max(150),
+  checks: z.array(z.object({ key: z.string().min(1).max(100), supported: z.boolean(), reason: processingNote() })).max(150),
   additions: z.array(teachingSchema).max(150).default([]),
   relationships: z.array(relationshipSchema).max(200).default([]),
   passages: z.array(dispositionSchema).max(30),
-  reviewComplete: z.boolean(), gaps: z.array(z.string().max(900)).max(40).default([]),
+  reviewComplete: z.boolean(), gaps: z.array(processingNote(0)).max(40).default([]),
   clarifications: z.array(clarificationSchema).max(3).default([]),
 });
 export type Teaching = z.infer<typeof teachingSchema>;
@@ -37,10 +47,10 @@ export type KnowledgeReview = z.infer<typeof reviewSchema>;
 export type PassageAudit = KnowledgePassageAudit;
 export const granularityInstructions = `Granularity audit: one independently useful interpretation, correspondence, condition, exception, or fact per node. Do not bundle an orbit period, eccentricity, psychological interpretation and chart-placement rule into one node just because they share a planet. Split each decan correspondence into its own node while retaining a separate complete worked procedure when useful. Preserve every necessary qualification with its individual rule. Claims about scientific proof, biology, medicine, or physical causation made by the author must be explicitly identified as the author's claim or symbolic framework, not established fact. Schema limits: label <=180 characters, topic <=100, text <=3500, each quote 12..1800, each alias <=100, <=12 aliases, <=8 evidence quotes per teaching. Use ONLY the documented kind and applicationTags enums. A verifier must mark a passage incomplete if distinct teachings remain bundled in a way that prevents individual lookup.`;
 export const finalVerificationSchema = z.object({
-  teachings: z.array(z.object({ key: z.string().max(100), supported: z.boolean(), duplicateOf: z.string().max(180).optional(), reason: z.string().min(3).max(900), usefulness: z.object({ decision: z.enum(["teaching", "book-metadata", "author-commentary", "nonteaching-story", "uncertain"]), reason: z.string().min(10).max(900), applicationQuestion: z.string().max(500).optional() }).optional() })).max(300),
-  relationships: z.array(z.object({ index: z.number().int().min(0), supported: z.boolean(), reason: z.string().min(3).max(900) })).max(200),
-  passages: z.array(z.object({ passageId: z.string().max(180), complete: z.boolean(), reason: z.string().min(3).max(900) })).max(30),
-  gaps: z.array(z.string().max(900)).max(40).default([]),
+  teachings: z.array(z.object({ key: z.string().max(100), supported: z.boolean(), duplicateOf: z.string().max(180).optional(), reason: processingNote(), usefulness: z.object({ decision: z.enum(["teaching", "book-metadata", "author-commentary", "nonteaching-story", "uncertain"]), reason: processingNote(10), applicationQuestion: z.string().max(500).optional() }).optional() })).max(300),
+  relationships: z.array(z.object({ index: z.number().int().min(0), supported: z.boolean(), reason: processingNote() })).max(200),
+  passages: z.array(z.object({ passageId: z.string().max(180), complete: z.boolean(), reason: processingNote() })).max(30),
+  gaps: z.array(processingNote(0)).max(40).default([]),
 });
 export type FinalVerification = z.infer<typeof finalVerificationSchema>;
 

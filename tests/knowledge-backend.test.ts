@@ -102,10 +102,11 @@ test("resumable three-worker extraction isolates storage, accounts real usage an
         assert.deepEqual(request.provider.max_price,{prompt:.35,completion:1.4,request:0});
         assert.equal(request.provider.sort,'throughput');
         assert.equal(request.max_tokens,12000);
+        assert.match(request.messages[0].content,/processing reason and gaps entry concise/);
         const data=JSON.parse(request.messages[1].content);
         const target=data.targetPassages;
         const teachings=target.map((p,i)=>({key:'t'+i,label:'Timing rule '+p.id,kind:'rule',topic:'Profection Activation',text:p.text,aliases:['activation'],applicationTags:['timing'],evidence:[{passageId:p.id,quote:p.text}]}));
-        const dispositions=target.map(p=>({passageId:p.id,disposition:'extracted',reason:'The complete source timing distinction is retained.'}));
+        const dispositions=target.map(p=>({passageId:p.id,disposition:'extracted',reason:'The complete source timing distinction is retained. '.repeat(30)}));
         const output=data.proposedTeachings?{teachings:data.proposedTeachings.map(t=>({key:t.key,supported:true,reason:'Every assertion, alias and application tag is explicitly supported.',usefulness:{decision:'teaching',reason:'Provides the concrete source-backed subject rule.',applicationQuestion:'What source rule applies in this situation?'}})),relationships:[],passages:target.map(p=>({passageId:p.id,complete:true,reason:'Every teaching is retained and all conditions are preserved.'})),gaps:[]}:data.candidate?{checks:data.candidate.teachings.map(t=>({key:t.key,supported:true,reason:'Every condition is explicitly supported by the exact source passage.'})),additions:[],relationships:[],passages:dispositions,reviewComplete:true,gaps:[]}:{teachings,relationships:[],passages:dispositions,gaps:[]};
         if(emitQuestions && !data.proposedTeachings)output.clarifications=[{passageId:target[0].id,quote:target[0].text,question:'Would this borderline teaching example be useful?',reason:'The example mixes a reusable rule with storytelling and the intended usefulness is genuinely unclear.'},{passageId:'unknown-passage',quote:target[0].text,question:'Would this unsupported question be useful?',reason:'Fixture with a nonexistent evidence passage must not become a user clarification.'}];
         // Later pages may complete first; durable graph order is not page order.
