@@ -24,6 +24,7 @@ export interface Source {
   content?: string;
 }
 export interface Passage {
+  image?: { id: string; driveId: string; sha256: string; mimeType: "image/jpeg"; filename: string; printedPage?: number; ocrVerified?: boolean };
   id: string;
   sourceId: string;
   sourceTitle: string;
@@ -62,6 +63,8 @@ export interface GraphEdge {
 }
 
 export interface KnowledgeEvidence {
+  imageId?: string;
+  visualObservation?: string;
   passageId: string;
   sourceId: string;
   page: number | null;
@@ -77,6 +80,8 @@ export interface KnowledgePassageAudit {
 }
 export type KnowledgeStage = "queued" | "running" | "paused" | "paused-budget" | "complete" | "needs-review" | "failed";
 export interface KnowledgeJobSummary {
+  imagePassages?: number;
+  reviewedImages?: number;
   scanPass?: number;
   completedPasses?: number[];
   openQuestions?: number;
@@ -176,7 +181,7 @@ export interface Workspace {
   sources: Source[];
   nodes: GraphNode[];
   edges: GraphEdge[];
-  stats: { sources: number; passages: number; nodes: number; edges: number; characters: number; pages: number };
+  stats: { sources: number; passages: number; nodes: number; teachings?: number; edges: number; characters: number; pages: number };
   settings: { provider: Settings["provider"]; model: string; connected: boolean; writingInstructions: string };
   drafts: Draft[];
   runs: Run[];

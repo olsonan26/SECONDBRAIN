@@ -11,6 +11,7 @@ import { brainKey, MAIN_BRAIN_ID } from "@/lib/brain-scope";
 import { createKnowledgeJob, listKnowledgeJobs, getKnowledgeJob, stepKnowledgeJob, pauseKnowledgeJob, resumeKnowledgeJob } from "@/lib/knowledge";
 import { startNextKnowledgePass, knowledgeActivity, answerKnowledgeQuestion } from "@/lib/knowledge";
 import { getSpending } from "@/lib/spend";
+import { readPassageImage } from "@/lib/knowledge-images";
 import { getQuestionCoverage, saveQuestionProfile } from "@/lib/knowledge-question-profile";
 import { knowledgeNodeDetail, searchKnowledgeNodes } from "@/lib/knowledge-graph";
 
@@ -46,6 +47,12 @@ async function handle(request: Request, context: Context) {
     const brainId = brainParams.get("brain") ?? MAIN_BRAIN_ID;
     await requireBrain(brainId);
     if (route === "spending" && request.method === "GET") return json(await getSpending(brainId));
+    if (route === "source-image" && request.method === "GET") {
+      const passage = (await getCorpus(brainId)).passages.find(passage => passage.id === brainParams.get("passage"));
+      if (!passage?.image) throw new HttpError(404, "This page image is not in the selected brain.");
+      const bytes = await readPassageImage(passage);
+      return new Response(new Blob([bytes as BlobPart], { type: "image/jpeg" }).stream(), { headers: { "Content-Type": "image/jpeg", "Cache-Control": "private, max-age=3600", "X-Content-Type-Options": "nosniff" } });
+    }
     if (route === "knowledge/nodes" && request.method === "GET") {
       const input = z.object({ q: z.string().max(300).default(""), offset: z.coerce.number().int().min(0).max(1_000_000).default(0), limit: z.coerce.number().int().min(1).max(100).default(50) }).parse(Object.fromEntries(brainParams));
       return json(searchKnowledgeNodes(await getCorpus(brainId), input.q, input.offset, input.limit));

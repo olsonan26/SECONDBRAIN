@@ -155,9 +155,9 @@ function phraseScore(wanted: string[], normalized: string, names: IndexedName[])
 function exactEvidence(node: GraphNode, passages: Map<string, Passage>, sources: Map<string, Source>, brainId: string): QuestionCoverageEvidence[] {
   return (node.evidence ?? []).flatMap(item => {
     const passage = passages.get(item.passageId), source = sources.get(item.sourceId);
-    if (!passage || !source || passage.sourceId !== item.sourceId || passage.page !== item.page || !node.sourceIds.includes(item.sourceId) || item.quote.trim().length < 12) return [];
+    if (!passage || !source || passage.sourceId !== item.sourceId || passage.page !== item.page || !node.sourceIds.includes(item.sourceId)) return [];
     const whitespace = (value: string) => value.trim().replace(/\s+/g, " ");
-    if (!whitespace(passage.text).includes(whitespace(item.quote))) return [];
+    if (item.imageId ? passage.image?.id !== item.imageId || (item.visualObservation?.trim().length ?? 0) < 20 : item.quote.trim().length < 12 || !whitespace(passage.text).includes(whitespace(item.quote))) return [];
     return [{ ...item, nodeId: node.id, sourceTitle: source.title, href: `/api/passage?id=${encodeURIComponent(item.passageId)}&brain=${encodeURIComponent(brainId)}` }];
   });
 }

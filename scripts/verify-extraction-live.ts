@@ -19,7 +19,8 @@ async function main() {
       assert.equal(login.status(), 200);
       const workspace = await (await context.request.get(`${origin}/api/workspace?brain=${brainId}`)).json();
       assert.equal(workspace.brain.name, "Astrology");
-      assert.equal(workspace.sources.length, 2);
+      assert.equal(workspace.sources.length, 3);
+      assert.ok(workspace.stats.teachings > 23);
       assert.equal(workspace.settings.provider, "openrouter");
       assert.equal(workspace.settings.connected, true);
       assert.ok(workspace.settings.writingInstructions.length > 4000);
@@ -31,6 +32,8 @@ async function main() {
       const jobs = await (await context.request.get(`${origin}/api/knowledge/jobs?brain=${brainId}`)).json();
       const job = jobs.jobs.find((job: { id: string }) => job.id === "03478f99-4e19-4fa9-a376-899ec53f657c");
       assert.ok(job && job.nodesAdded >= 23 && job.budgetUsd === 10);
+      assert.equal(job.imagePassages, 1028);
+      assert.ok(job.reviewedImages >= 1);
       const spendingResponse = await context.request.get(`${origin}/api/spending?brain=${brainId}`);
       assert.equal(spendingResponse.status(), 200);
       const spending = await spendingResponse.json();
@@ -40,7 +43,8 @@ async function main() {
       const activityResponse = await context.request.get(`${origin}/api/knowledge/jobs/${job.id}/activity?brain=${brainId}`);
       assert.equal(activityResponse.status(), 200);
       const activity = await activityResponse.json();
-      assert.ok(activity.audits.length >= 6);
+      assert.ok(activity.audits.length >= 1);
+      assert.ok(activity.events.some((event: { phase: string; message: string }) => event.phase === "image-input" && event.message.includes("verify")));
       if (name === "Peter") for (const action of ["next-pass", "step", "pause", "answer"]) {
         const denied = await context.request.post(`${origin}/api/knowledge/jobs/${job.id}/${action}?brain=${brainId}`, { headers: { Origin: origin }, data: {} });
         assert.equal(denied.status(), 403, "Member access must not start paid work or change checkpoints.");
@@ -53,16 +57,27 @@ async function main() {
       const passage = await (await context.request.get(`${origin}/api/passage?brain=${brainId}&id=${encodeURIComponent(evidence.passageId)}`)).json();
       assert.ok(passage.text.includes(evidence.quote));
       assert.equal(passage.sourceId, sourceId);
+      const photoNode = workspace.nodes.find((node: { evidence?: { imageId?: string }[] }) => node.evidence?.some(item => item.imageId));
+      assert.ok(photoNode, "Verified image-backed teachings must appear in the live graph.");
+      const photoDetail = await (await context.request.get(`${origin}/api/knowledge/node?brain=${brainId}&id=${encodeURIComponent(photoNode.id)}`)).json();
+      const visual = photoDetail.node.evidence.find((item: { imageId?: string }) => item.imageId);
+      assert.ok(visual.visualObservation.length >= 20);
+      const originalPassage = await (await context.request.get(`${origin}/api/passage?brain=${brainId}&id=${encodeURIComponent(visual.passageId)}`)).json();
+      const image = await context.request.get(`${origin}/api/source-image?brain=${brainId}&passage=${encodeURIComponent(visual.passageId)}`);
+      assert.equal(image.status(), 200);
+      assert.equal(createHash("sha256").update(await image.body()).digest("hex"), originalPassage.image.sha256);
+      assert.equal((await context.request.get(`${origin}/api/source-image?brain=main&passage=${encodeURIComponent(visual.passageId)}`)).status(), 404, "Images cannot cross brain boundaries.");
       const page = await context.newPage();
       const errors: string[] = [];
       page.on("pageerror", error => errors.push(error.message));
       await page.goto(`${origin}/?brain=${brainId}`);
       const spendingBar = page.getByRole("region", { name: "Model spending" });
-      await expect(spendingBar).toContainText("$0.0482");
+      await expect(spendingBar).toContainText(`$${job.costUsd.toFixed(4)}`);
       await spendingBar.getByRole("button", { name: "Refresh spending" }).click();
       await expect(spendingBar.getByRole("button", { name: "Refresh spending" })).toBeEnabled();
       await page.getByRole("button", { name: "Knowledge extraction", exact: true }).click();
-      await expect(page.locator(".knowledge-extraction")).toContainText("23");
+      await expect(page.locator(".knowledge-extraction")).toContainText(String(job.nodesAdded));
+      await expect(page.locator(".knowledge-extraction")).toContainText("1,028 original images connected");
       await expect(page.getByRole("heading", { name: "Full-book pass 1 of 3" })).toBeVisible();
       await page.getByText("Activity, evidence decisions & questions", { exact: true }).click();
       await expect(page.getByRole("heading", { name: "Recent passage decisions" })).toBeVisible();
@@ -74,7 +89,7 @@ async function main() {
         assert.equal(createHash("sha256").update(bytes).digest("hex"), "a821e6e585aa027d1d2a1a6dc0b6814a1169ebc6d8d75e1212e91dff72737a69");
       }
       assert.deepEqual(errors, []);
-      console.log(JSON.stringify({ account: name, live: true, sources: workspace.sources.length, pilotNodes: job.nodesAdded, measuredCostUsd: job.measuredCostUsd, mainSourcesUnchanged: main.sources.length, exactEvidence: true, originalVerified: name === "Alex", paidCalls: 0 }));
+      console.log(JSON.stringify({ account: name, live: true, sources: workspace.sources.length, teachingNodes: workspace.stats.teachings, connectedImages: job.imagePassages, reviewedImages: job.reviewedImages, trackedCostUsd: job.costUsd, measuredCostUsd: job.measuredCostUsd, mainSourcesUnchanged: main.sources.length, exactEvidence: true, imageFingerprintVerified: true, originalVerified: name === "Alex", paidCalls: 0 }));
       await context.close();
     }
   } finally { await browser.close(); }

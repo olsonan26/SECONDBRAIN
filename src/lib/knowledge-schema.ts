@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import type { Corpus, GraphEdge, GraphNode, KnowledgeEvidence, KnowledgePassageAudit, Passage } from "./types";
 
-export const knowledgeEvidenceSchema = z.object({ passageId: z.string().min(1).max(180), quote: z.string().min(12).max(1800) });
+export const knowledgeEvidenceSchema = z.object({ passageId: z.string().min(1).max(180), quote: z.string().max(1800).default(""), imageId: z.string().max(180).optional(), visualObservation: z.string().min(20).max(1800).optional() }).refine(value => value.quote.length >= 12 || Boolean(value.imageId && value.visualObservation), "Provide an exact source quote or a specific observation tied to the attached original image.");
 const teachingSchema = z.object({
   key: z.string().min(1).max(100), label: z.string().min(3).max(180),
   kind: z.enum(["definition", "interpretation", "procedure", "formula", "rule", "distinction", "example", "warning", "correspondence"]),
@@ -36,7 +36,7 @@ export type KnowledgeReview = z.infer<typeof reviewSchema>;
 export type PassageAudit = KnowledgePassageAudit;
 export const granularityInstructions = `Granularity audit: one independently useful interpretation, correspondence, condition, exception, or fact per node. Do not bundle an orbit period, eccentricity, psychological interpretation and chart-placement rule into one node just because they share a planet. Split each decan correspondence into its own node while retaining a separate complete worked procedure when useful. Preserve every necessary qualification with its individual rule. Claims about scientific proof, biology, medicine, or physical causation made by the author must be explicitly identified as the author's claim or symbolic framework, not established fact. Schema limits: label <=180 characters, topic <=100, text <=3500, each quote 12..1800, each alias <=100, <=12 aliases, <=8 evidence quotes per teaching. Use ONLY the documented kind and applicationTags enums. A verifier must mark a passage incomplete if distinct teachings remain bundled in a way that prevents individual lookup.`;
 export const finalVerificationSchema = z.object({
-  teachings: z.array(z.object({ key: z.string().max(100), supported: z.boolean(), reason: z.string().min(3).max(900) })).max(300),
+  teachings: z.array(z.object({ key: z.string().max(100), supported: z.boolean(), duplicateOf: z.string().max(180).optional(), reason: z.string().min(3).max(900) })).max(300),
   relationships: z.array(z.object({ index: z.number().int().min(0), supported: z.boolean(), reason: z.string().min(3).max(900) })).max(200),
   passages: z.array(z.object({ passageId: z.string().max(180), complete: z.boolean(), reason: z.string().min(3).max(900) })).max(30),
   gaps: z.array(z.string().max(900)).max(40).default([]),
@@ -69,7 +69,28 @@ export function independentlyVerifiedFragment(candidate: Extraction, review: Kno
     const values = verification.passages.filter(v => v.passageId === audit.passageId);
     return values.length === 1 && values[0].complete && !relationshipFailures.has(audit.passageId) ? audit : { ...audit, disposition: "unresolved" as const, reason: values[0]?.reason ?? "The final verification omitted or duplicated this passage." };
   });
-  return reviewFragment({ ...candidate, teachings: combined }, { ...review, checks, additions: [], relationships, passages: audited, gaps: [...review.gaps, ...verification.gaps] }, passages, jobId, corpus);
+  const fragment = reviewFragment({ ...candidate, teachings: combined }, { ...review, checks, additions: [], relationships, passages: audited, gaps: [...review.gaps, ...verification.gaps] }, passages, jobId, corpus);
+  const byKey = new Map(combined.map(teaching => {
+    const evidence = validatedEvidence(teaching.evidence, passages);
+    const sourceIds = [...new Set(evidence?.map(e => e.sourceId) ?? [])];
+    return [teaching.key, stableId("knowledge", `${sourceIds.sort().join("|")}|${teaching.kind}|${teaching.label.toLowerCase()}|${teaching.text}`)];
+  }));
+  // The final independent reviewer may identify a strictly equivalent existing
+  // atomic claim. Never use fuzzy text similarity to merge different conditions.
+  const replacements = new Map<string, string>();
+  for (const check of verification.teachings) {
+    if (!check.supported || !check.duplicateOf || !checked(check.key)) continue;
+    const from = byKey.get(check.key), target = byKey.get(check.duplicateOf) ?? check.duplicateOf;
+    if (from && from !== target && fragment.nodes.some(n => n.id === from) && (fragment.nodes.some(n => n.id === target) || corpus.nodes.some(n => n.id === target && n.type === "teaching"))) replacements.set(from, target);
+  }
+  const resolve = (id: string) => { const seen = new Set<string>(); let current = id; while (replacements.has(current) && !seen.has(current)) { seen.add(current); current = replacements.get(current)!; } return seen.has(current) ? id : current; };
+  const merged = new Map<string, GraphNode>();
+  for (const original of fragment.nodes) {
+    const id = resolve(original.id), prior = merged.get(id) ?? corpus.nodes.find(node => node.id === id);
+    const node = prior ? { ...prior, sourceIds: [...new Set([...prior.sourceIds, ...original.sourceIds])], aliases: [...new Set([...(prior.aliases ?? []), original.label, ...(original.aliases ?? [])])], applicationTags: [...new Set([...(prior.applicationTags ?? []), ...(original.applicationTags ?? [])])], evidence: [...new Map([...(prior.evidence ?? []), ...(original.evidence ?? [])].map(e => [`${e.passageId}|${e.quote}|${e.visualObservation ?? ""}`, e])).values()] } : { ...original, id };
+    merged.set(id, node);
+  }
+  return { ...fragment, nodes: [...merged.values()], edges: fragment.edges.flatMap(edge => { const source = resolve(edge.source), target = resolve(edge.target); return source === target ? [] : [{ ...edge, source, target, id: stableId("verified-edge", `${source}|${target}|${edge.relation}`) }]; }), audits: fragment.audits.map(audit => ({ ...audit, nodeIds: [...new Set(audit.nodeIds.map(resolve))] })) };
 }
 
 function stableId(prefix: string, text: string) { return `${prefix}-${createHash("sha256").update(text).digest("hex").slice(0, 28)}`; }
@@ -83,11 +104,23 @@ export function validatedEvidence(input: z.infer<typeof knowledgeEvidenceSchema>
   const evidence: KnowledgeEvidence[] = [];
   for (const value of input) {
     const passage = passages.find(p => p.id === value.passageId);
+    if (passage?.image && (!value.imageId || !value.visualObservation)) return null;
+    if (value.imageId || value.visualObservation) {
+      if (!passage?.image || value.imageId !== passage.image.id || !value.visualObservation || value.visualObservation.length < 20) return null;
+      evidence.push({ passageId: passage.id, sourceId: passage.sourceId, page: passage.page, quote: "", imageId: passage.image.id, visualObservation: value.visualObservation });
+      continue;
+    }
     const quote = passage && sourceQuote(passage.text, value.quote);
     if (!passage || !quote || quote.length < 12) return null;
     evidence.push({ passageId: passage.id, sourceId: passage.sourceId, page: passage.page, quote });
   }
   return evidence;
+}
+
+/** Same-model reviews have demonstrably misread small chart glyphs. Keep those
+ * candidates unresolved until separate visual verification can establish them. */
+export function requiresVisualStructureReview(node: Pick<GraphNode, "label" | "description" | "evidence">) {
+  return Boolean(node.evidence?.some(e => e.imageId)) && /\bglyphs?\b|\bwheel diagram\b|\bdiagram\s*:\s*|\bsector\s+\d/iu.test(`${node.label} ${node.description}`);
 }
 
 export function reviewFragment(candidate: Extraction, review: KnowledgeReview, passages: Passage[], jobId: string, corpus: Corpus) {
@@ -114,11 +147,16 @@ export function reviewFragment(candidate: Extraction, review: KnowledgeReview, p
     const layer = corpus.sources.find(s => s.id === sourceIds[0])?.layer ?? "uploaded";
     const id = stableId("knowledge", `${sourceIds.sort().join("|")}|${teaching.kind}|${teaching.label.toLowerCase()}|${teaching.text}`);
     const node: GraphNode = { id, label: teaching.label, type: "teaching", knowledgeKind: teaching.kind, aliases: teaching.aliases, applicationTags: teaching.applicationTags, community: teaching.topic, description: teaching.text, layer, sourceIds, degree: 0, evidence, extractionJobId: jobId };
+    if (requiresVisualStructureReview(node)) {
+      for (const item of evidence) rejected.add(item.passageId);
+      warnings.push(`Visual structure requires separate verification before publishing: ${node.label}. Original image and proposed teaching retained in the private review archive.`);
+      continue;
+    }
     const existing = nodes.find(value => value.id === node.id);
     if (existing) {
       existing.aliases = [...new Set([...(existing.aliases ?? []), ...teaching.aliases])];
       existing.applicationTags = [...new Set([...(existing.applicationTags ?? []), ...teaching.applicationTags])];
-      existing.evidence = [...new Map([...(existing.evidence ?? []), ...evidence].map(value => [`${value.passageId}|${value.quote}`, value])).values()];
+      existing.evidence = [...new Map([...(existing.evidence ?? []), ...evidence].map(value => [`${value.passageId}|${value.quote}|${value.imageId ?? ""}|${value.visualObservation ?? ""}`, value])).values()];
     } else nodes.push(node);
     accepted.set(teaching.key, existing ?? node);
     for (const sourceId of sourceIds) edges.push({ id: stableId("evidence", `${sourceId}|${id}`), source: `source:${sourceId}`, target: id, relation: "contains teaching", confidence: "EXTRACTED", score: 1, sourceIds: [sourceId], evidence: evidence.filter(e => e.sourceId === sourceId), extractionJobId: jobId });

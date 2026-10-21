@@ -2,7 +2,7 @@ import type { Corpus, GraphNode } from "./types";
 import { createGraphScene } from "./graph-scene";
 
 function compact(node: GraphNode): GraphNode {
-  return { ...node, label: node.label.slice(0, 180), description: node.description.slice(0, 500), sourceIds: node.sourceIds.slice(0, 8), aliases: node.aliases?.slice(0, 6).map(alias => alias.slice(0, 80)), evidence: node.evidence?.slice(0, 1).map(e => ({ ...e, quote: e.quote.slice(0, 220) })) };
+  return { ...node, label: node.label.slice(0, 180), description: node.description.slice(0, 500), sourceIds: node.sourceIds.slice(0, 8), aliases: node.aliases?.slice(0, 6).map(alias => alias.slice(0, 80)), evidence: node.evidence?.slice(0, 1).map(e => ({ ...e, quote: e.quote.slice(0, 220), visualObservation: e.visualObservation?.slice(0, 350) })) };
 }
 /** Keep SSR/API payloads bounded; the complete graph remains in private storage. */
 export function knowledgeOverview(corpus: Corpus) {

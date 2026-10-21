@@ -20,7 +20,8 @@ export function retrieveWithKnowledge(corpus: Corpus, question: string, sourceId
   for (const candidate of candidates) {
     for (const evidence of candidate.node.evidence ?? []) {
       const passage = passages.get(evidence.passageId);
-      if (!passage || passage.sourceId !== evidence.sourceId || !passage.text.includes(evidence.quote) || (allowed.size && !allowed.has(passage.sourceId)) || routed.some(c => c.id === passage.id)) continue;
+      const supported = passage && (evidence.imageId ? passage.image?.id === evidence.imageId && (evidence.visualObservation?.length ?? 0) >= 20 : evidence.quote.length >= 12 && passage.text.includes(evidence.quote));
+      if (!passage || !supported || passage.sourceId !== evidence.sourceId || (allowed.size && !allowed.has(passage.sourceId)) || routed.some(c => c.id === passage.id)) continue;
       if (routed.length >= max || routedCharacters + passage.text.length > 18_000) break;
       routed.push({ ...passage, terms: undefined, number: routed.length + 1, score: candidate.score });
       routedCharacters += passage.text.length;
@@ -29,10 +30,12 @@ export function retrieveWithKnowledge(corpus: Corpus, question: string, sourceId
   }
   // Reserve room for evidenced graph routing even when lexical retrieval is full.
   const order = [...routed.slice(0, Math.min(3, max)), ...direct, ...routed.slice(3)];
-  const out: Citation[] = []; let characters = 0;
+  const out: Citation[] = []; let characters = 0, images = 0;
   for (const passage of order) {
     if (out.length >= max) break;
     if (out.some(c => c.id === passage.id) || characters + passage.text.length > 18_000) continue;
+    if (passage.image && images >= 2) continue;
+    if (passage.image) images++;
     out.push({ ...passage, number: out.length + 1 }); characters += passage.text.length;
   }
   return out;

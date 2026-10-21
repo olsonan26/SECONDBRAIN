@@ -7,11 +7,13 @@ import { requireBrain } from "./brains";
 import { getCorpus, invalidateCorpus } from "./corpus";
 import { getSettings } from "./model";
 import { modelConnection, modelError } from "./model-provider";
-import { listRecords, readRecord, updateRecord } from "./storage";
+import { listRecords, readRecord, updateRecord, writeRecord } from "./storage";
 import { applicationInstructions, extractionSchema, extractionShape, finalVerificationInstructions, finalVerificationSchema, independentlyVerifiedFragment, knowledgeInstructions, reviewSchema, reviewShape, type Extraction, type KnowledgeReview, type PassageAudit } from "./knowledge-schema";
 import { granularityInstructions, validatedEvidence } from "./knowledge-schema";
+import { imageMessages, imageContextCeiling } from "./knowledge-images";
+import { mergeRepeatedTeachings, mergeGraphEdges } from "./knowledge-dedup";
 
-const LEASE_MS = 110_000;
+const LEASE_MS = 150_000;
 const MAX_COMPLETION_TOKENS = 12_000;
 const MAX_ATTEMPTS = 3;
 const MAX_WORKERS = 3;
@@ -24,7 +26,8 @@ type Batch = {
   attempts: number; revision: number; lease?: { token: string; expiresAt: number; reservation: number };
   candidate?: Extraction; review?: KnowledgeReview; error?: string;
 };
-interface KnowledgeJob {
+export interface KnowledgeJob {
+  imagePassageIds?: string[];
   scanPass?: number;
   passHistory?: { pass: number; finishedAt: string; nodesAdded: number; costUsd: number; audits: PassageAudit[] }[];
   activity?: { at: string; pass: number; phase: string; message: string; passageIds: string[] }[];
@@ -42,6 +45,16 @@ type SourceRegistry = { sources: Record<string, string>; creating: Record<string
 const round = (value: number) => Math.round(value * 1e8) / 1e8;
 const stamp = () => new Date().toISOString();
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
+export const knowledgePassageHash = (passage: Passage) => hash(passage.text + (passage.image ? `\nOriginal image SHA256:${passage.image.sha256}` : ""));
+function makeBatches(passages: Passage[], prefix = ""): Batch[] {
+  const batches: Batch[] = [];
+  for (let offset = 0; offset < passages.length;) {
+    const count = passages[offset].image || passages[offset + 1]?.image ? 1 : BATCH_SIZE;
+    batches.push({ id: `${prefix}${batches.length}`, passageIds: passages.slice(offset, offset + count).map(passage => passage.id), phase: "extract", state: "pending", attempts: 0, revision: 0 });
+    offset += count;
+  }
+  return batches;
+}
 function jobKey(brainId: string, id: string) {
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)) throw new HttpError(400, "Invalid knowledge extraction job ID.");
   return brainKey(brainId, `knowledge/jobs/${id}.json`);
@@ -61,7 +74,7 @@ function summary(job: KnowledgeJob): KnowledgeJobSummary {
     inputTokens: job.inputTokens, outputTokens: job.outputTokens,
     requirementsCount: job.requirements.split(/\r?\n/).filter(line => line.trim()).length,
     currentPhase: (job.batches.find(b => b.state === "leased")?.phase ?? job.batches.find(b => b.state === "pending")?.phase) === "extract" ? "extract" : "review",
-    error: job.error, warnings: job.warnings };
+    error: job.error, warnings: job.warnings, imagePassages: job.imagePassageIds?.length ?? 0, reviewedImages: job.passages.filter(passage => job.imagePassageIds?.includes(passage.passageId) && passage.disposition !== "pending").length };
 }
 async function readJob(id: string, brainId: string) {
   let job = (await readRecord<KnowledgeJob>(jobKey(brainId, id)))?.value;
@@ -111,11 +124,10 @@ export async function startNextKnowledgePass(id: string, brainId: string) {
     const pass = job.scanPass ?? 1;
     if (pass >= 3) throw new HttpError(409, "All three full-book passes have already been run. Review unresolved evidence rather than silently starting a fourth paid scan.");
     const passages = corpus.passages.filter(passage => job.sourceIds.includes(passage.sourceId));
-    if (passages.length !== job.passages.length || passages.some(passage => hash(passage.text) !== job.passageHashes[passage.id])) throw new HttpError(409, "The source changed. This scan cannot silently replace the saved book.");
+    if (passages.length !== job.passages.length || passages.some(passage => knowledgePassageHash(passage) !== job.passageHashes[passage.id])) throw new HttpError(409, "The source changed. This scan cannot silently replace the saved book.");
     job.passHistory = [...(job.passHistory ?? []), { pass, finishedAt: stamp(), nodesAdded: job.nodesAdded, costUsd: job.costUsd, audits: structuredClone(job.passages) }];
     job.scanPass = pass + 1;
-    job.batches = [];
-    for (let offset = 0; offset < passages.length; offset += BATCH_SIZE) job.batches.push({ id: `pass${pass + 1}-${offset / BATCH_SIZE}`, passageIds: passages.slice(offset, offset + BATCH_SIZE).map(passage => passage.id), phase: "extract", state: "pending", attempts: 0, revision: 0 });
+    job.batches = makeBatches(passages, `pass${pass + 1}-`);
     job.passages = passages.map(passage => ({ passageId: passage.id, sourceId: passage.sourceId, page: passage.page, disposition: "pending", reason: "Awaiting the next full-book coverage pass.", nodeIds: [] }));
     job.stage = "queued"; job.error = undefined; job.updatedAt = stamp();
     logActivity(job, "scan", `Owner started full-book pass ${pass + 1} of 3. All passages will be reread against existing graph knowledge. The same accumulated spending cap is retained.`);
@@ -168,15 +180,15 @@ export async function createKnowledgeJob(input: { sourceIds: string[]; requireme
   const existing = await listKnowledgeJobs(brainId);
   if (existing.some(j => j.stage !== "complete" && j.sourceIds.some(id => sourceIds.includes(id)))) throw new HttpError(409, "An extraction job already exists for this source. Resume that job to keep its progress and spending cap.");
   const id = randomUUID(), now = stamp();
-  const batches: Batch[] = [];
-  for (let offset = 0; offset < passages.length; offset += BATCH_SIZE) batches.push({ id: `${offset / BATCH_SIZE}`, passageIds: passages.slice(offset, offset + BATCH_SIZE).map(p => p.id), phase: "extract", state: "pending", attempts: 0, revision: 0 });
+  const batches = makeBatches(passages);
   const inputEstimate = passages.reduce((n, p) => n + p.text.length, 0) / 3;
   const estimatedTotalCostUsd = round(inputEstimate * INPUT_RATE * 4 + batches.length * MAX_COMPLETION_TOKENS * OUTPUT_RATE * 3);
   const job: KnowledgeJob = { version: 1, id, brainId, sourceIds, author, createdAt: now, updatedAt: now, stage: "queued", provider: settings.provider, model: settings.model,
+    imagePassageIds: passages.filter(passage => passage.image).map(passage => passage.id),
     requirements, budgetUsd, costUsd: 0, measuredCostUsd: 0, estimatedCostUsd: 0, estimatedTotalCostUsd, inputTokens: 0, outputTokens: 0, nodesAdded: 0, edgesAdded: 0, accountedCalls: [],
     passages: passages.map(p => ({ passageId: p.id, sourceId: p.sourceId, page: p.page, disposition: "pending", reason: "Not yet independently reviewed.", nodeIds: [] })),
-    passageHashes: Object.fromEntries(passages.map(p => [p.id, hash(p.text)])), batches,
-    warnings: ["Text-only extraction cannot read unextracted chart drawings or image-only tables. Such passages remain unresolved until the visual material is supplied.", "Processing every passage and performing omission reviews does not guarantee that AI found every possible teaching. Exact evidence and a coverage audit are retained.", "Spending includes measured provider cost when returned, otherwise conservative token-based or full-call reservation accounting. The cap is checked before every model call."] };
+    passageHashes: Object.fromEntries(passages.map(p => [p.id, knowledgePassageHash(p)])), batches,
+    warnings: [passages.some(p => p.image) ? "Original page images are attached to every extraction, omission-review and verification call. OCR is an unverified search aid. Unreadable visual details remain unresolved, never guessed." : "Text-only extraction cannot read unextracted chart drawings or image-only tables. Such passages remain unresolved until the visual material is supplied.", "Processing every passage and performing omission reviews does not guarantee that AI found every possible teaching. Exact evidence and a coverage audit are retained.", "Spending includes measured provider cost when returned, otherwise conservative token-based or full-call reservation accounting. The cap is checked before every model call."] };
   // All selected sources are claimed in one compare-and-swap. Two tabs cannot
   // create independent spending caps for the same book at the same time.
   const complete = new Set(existing.filter(j => j.stage === "complete").map(j => j.id));
@@ -219,7 +231,8 @@ export async function resumeKnowledgeJob(id: string, brainId: string, input: { b
       batch.state = "pending"; batch.attempts = 0; batch.error = undefined;
       for (const audit of job.passages) if (batch.passageIds.includes(audit.passageId)) { audit.disposition = "pending"; audit.reason = "Resuming a previously failed bounded request."; }
     }
-    for (const batch of job.batches) if (batch.state === "done" && batch.passageIds.some(p => job.passages.some(a => a.passageId === p && a.disposition === "unresolved"))) {
+    const firstPassStillPending = job.batches.some(batch => batch.state === "pending" || batch.state === "leased");
+    for (const batch of job.batches) if (!firstPassStillPending && batch.state === "done" && batch.passageIds.some(p => job.passages.some(a => a.passageId === p && a.disposition === "unresolved"))) {
       batch.state = "pending"; batch.phase = "extract"; batch.attempts = 0; batch.revision += 1; batch.candidate = undefined; batch.review = undefined;
       for (const audit of job.passages) if (batch.passageIds.includes(audit.passageId) && audit.disposition === "unresolved") { audit.disposition = "pending"; audit.reason = "Requeued for explicit follow-up review."; }
     }
@@ -229,7 +242,8 @@ export async function resumeKnowledgeJob(id: string, brainId: string, input: { b
 
 function promptFor(job: KnowledgeJob, batch: Batch, passages: Passage[], corpus: Corpus) {
   const contextIds = new Set(batch.passageIds);
-  const existing = corpus.nodes.filter(node => node.evidence?.some(evidence => contextIds.has(evidence.passageId))).slice(0, 60);
+  const contextWords = new Set(passages.flatMap(p => p.text.toLowerCase().match(/[\p{L}\p{N}']{4,}/gu) ?? []));
+  const existing = corpus.nodes.filter(node => node.type === "teaching").map(node => ({ node, score: node.evidence?.some(evidence => contextIds.has(evidence.passageId)) ? 1000 : (node.label.toLowerCase().match(/[\p{L}\p{N}']{4,}/gu) ?? []).filter(word => contextWords.has(word)).length })).filter(item => item.score >= 2).sort((a, b) => b.score - a.score).slice(0, 60).map(item => item.node);
   const existingIds = new Set(existing.map(node => node.id));
   const nodeLabels = new Map(corpus.nodes.map(node => [node.id, node.label]));
   const boundary: Passage[] = [];
@@ -241,20 +255,22 @@ function promptFor(job: KnowledgeJob, batch: Batch, passages: Passage[], corpus:
   const vocabulary = new Set(passages.flatMap(p => p.text.toLowerCase().match(/[\p{L}\p{N}']{4,}/gu) ?? []));
   const lines = job.requirements.split(/\r?\n/).map(text => ({ text, score: (text.toLowerCase().match(/[\p{L}\p{N}']{4,}/gu) ?? []).reduce((n, term) => n + Number(vocabulary.has(term)), 0) })).filter(v => v.score > 0).sort((a, b) => b.score - a.score);
   const requirements = lines.slice(0, 24).map(v => v.text).join("\n").slice(0, 6000);
+  const imagePolicy = passages.some(passage => passage.image) ? `\nORIGINAL PAGE IMAGES ARE ATTACHED. Read the text AND diagrams, chart layouts, arrows, wheels, tables, degrees, glyphs and relationships in the actual image during extraction, review AND verification. OCR is an unverified search aid; correct readings must come from the image, not guessed astrology knowledge. MANDATORY for EVERY teaching from an image-backed target, including ordinary visible text: use evidence:{passageId,imageId,visualObservation,quote:""}; imageId must match the supplied target's image.id and visualObservation must precisely describe the visible labels/geometry supporting that specific claim. These observations are NOT verbatim quotations. Every such evidence item MUST have imageId AND a precise visualObservation, even for printed prose. An OCR quote alone is invalid. Optional quote may be empty; do not repeat faulty OCR as evidence. Relationship labels must be short (at most 140 characters), not entire explanatory paragraphs. If OCR says 1800 while the image says 180 degrees, cite an image observation, not the wrong OCR. Mark genuinely unreadable symbols or uncertain chart connections unresolved. Never claim an attached image is absent. Do not list unrelated wish-list topics as missing just because this page does not address them. Prioritize every distinct reusable teaching, preserve conditions, and do not duplicate an existing claim merely by rephrasing it.` : "";
   return [
-    { role: "system", content: `${knowledgeInstructions}\n${applicationInstructions}\n${granularityInstructions}\nFull-book pass ${job.scanPass ?? 1} of 3. ${job.scanPass && job.scanPass > 1 ? "Reread EVERY supplied target passage looking for omissions, distinctions and exceptions missed in the existing graph. Existing graph summaries are navigation data, never evidence. Return additional source-backed atomic knowledge, not paraphrased duplicates." : "Perform initial discovery of every distinct teaching."}\nOnly when genuinely unable to decide whether a specific passage teaches reusable knowledge rather than unrelated storytelling, optionally return clarifications:[{passageId,quote,question,reason}]. Ask a concise usefulness question with the exact quote and concrete ambiguity. Default clarifications to []: do not ask about routine teachings, request permission repeatedly, or ask the user to invent facts. Owner preferences never override source evidence.\n${batch.phase === "extract" ? extractionShape : batch.phase === "review" ? reviewShape : finalVerificationInstructions}` },
+    { role: "system", content: `${knowledgeInstructions}\n${applicationInstructions}\n${granularityInstructions}\nFull-book pass ${job.scanPass ?? 1} of 3. ${job.scanPass && job.scanPass > 1 ? "Reread EVERY supplied target passage looking for omissions, distinctions and exceptions missed in the existing graph. Existing graph summaries are navigation data, never evidence. Return additional source-backed atomic knowledge, not paraphrased duplicates." : "Perform initial discovery of every distinct teaching."}\nOnly when genuinely unable to decide whether a specific passage teaches reusable knowledge rather than unrelated storytelling, optionally return clarifications:[{passageId,quote,question,reason}]. Ask a concise usefulness question with the exact quote and concrete ambiguity. Default clarifications to []: do not ask about routine teachings, request permission repeatedly, or ask the user to invent facts. Owner preferences never override source evidence.\n${batch.phase === "extract" ? extractionShape : batch.phase === "review" ? reviewShape : finalVerificationInstructions}${imagePolicy}` },
     { role: "user", content: JSON.stringify({ sourcePolicy: "Extract all teachings whether or not a wish-list question mentions them. Boundary context may clarify meaning but cite ONLY the supplied target passages, which are the ones audited in this batch.", coverageWishListNotEvidence: requirements,
-      targetPassages: passages.map(p => ({ id: p.id, sourceId: p.sourceId, page: p.page, section: p.section, text: p.text })),
+      targetPassages: passages.map(p => ({ id: p.id, sourceId: p.sourceId, page: p.page, section: p.section, text: p.text, ...(p.image ? { image: { id: p.image.id, sha256: p.image.sha256, filename: p.image.filename, ocrVerified: p.image.ocrVerified ?? false } } : {}) })),
       boundaryContextNotTarget: boundary.map(p => ({ page: p.page, text: p.text.slice(0, 2200) })),
       ...(batch.error ? { previousValidationFailureNotEvidence: batch.error } : {}),
-      existingGraphNavigationNotEvidence: { nodes: existing.map(node => ({ label: node.label, teaching: node.description.slice(0, 700) })), relationships: corpus.edges.filter(edge => existingIds.has(edge.source) || existingIds.has(edge.target)).slice(0, 80).map(edge => ({ source: nodeLabels.get(edge.source), relation: edge.relation, target: nodeLabels.get(edge.target) })) },
+      duplicateCheckInstructions: "Final verifier: compare every proposed claim with the other proposed claims and existing graph nodes. For a strictly identical atomic claim with all the same conditions and exceptions, include duplicateOf (the earlier proposed key or existing node id) on its teaching check. This authorizes merging provenance, not new facts. Never merge merely related, overlapping, opposite, or differently conditioned claims. Mark bundled multi-teaching proposals unsupported and the passage incomplete; each distinct rule must be independently retrievable. Do not complete cut-off sentences from general knowledge.",
+      existingGraphNavigationNotEvidence: { nodes: existing.map(node => ({ id: node.id, label: node.label, teaching: node.description.slice(0, 1200) })), relationships: corpus.edges.filter(edge => existingIds.has(edge.source) || existingIds.has(edge.target)).slice(0, 80).map(edge => ({ source: nodeLabels.get(edge.source), relation: edge.relation, target: nodeLabels.get(edge.target) })) },
       ownerUsefulnessPreferencesNotEvidence: (job.questions ?? []).filter(question => question.answer && contextIds.has(question.passageId)).map(question => ({ passageId: question.passageId, preference: question.answer, note: question.note })),
       ...(batch.phase === "review" ? { candidate: batch.candidate } : batch.phase === "verify" ? { proposedTeachings: [...(batch.candidate?.teachings ?? []), ...(batch.review?.additions ?? [])], proposedRelationships: batch.review?.relationships ?? [], proposedPassages: batch.review?.passages ?? [] } : {}) }) },
   ];
 }
-function reserveFor(messages: { role: string; content: string }[]) {
+function reserveFor(messages: { role: string; content: string }[], imageInputCeiling = 0) {
   // UTF-8 bytes bound input token count more conservatively than character/4 guesses.
-  const promptUpperTokens = Buffer.byteLength(JSON.stringify(messages), "utf8") + 1000;
+  const promptUpperTokens = Math.max(Buffer.byteLength(JSON.stringify(messages), "utf8") + 1000, imageInputCeiling);
   return round((promptUpperTokens * INPUT_RATE + MAX_COMPLETION_TOKENS * OUTPUT_RATE) * 1.05);
 }
 type Usage = { cost?: number; prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
@@ -294,17 +310,19 @@ async function appendFragment(brainId: string, job: KnowledgeJob, batch: Batch, 
   const initial = await getCorpus(brainId);
   const updated = await updateRecord<Corpus>(brainKey(brainId, "corpus.json"), initial, corpus => {
     if (corpus.knowledgeCommits?.[receipt]) return corpus;
-    const currentNodes = new Set(corpus.nodes.map(n => n.id)), currentEdges = new Set(corpus.edges.map(e => e.id));
-    const nodes = fragment.nodes.filter(n => !currentNodes.has(n.id));
-    const edges = fragment.edges.filter(e => !currentEdges.has(e.id));
+    const currentNodes = new Set(corpus.nodes.map(n => n.id));
+    const merged = mergeRepeatedTeachings(corpus.nodes, fragment.nodes, fragment.edges);
+    const edges = merged.edges;
+    const audits = fragment.audits.map(audit => ({ ...audit, nodeIds: [...new Set(audit.nodeIds.map(id => merged.redirects.get(id) ?? id))] }));
     const sourceNodes = [...new Set(fragment.nodes.flatMap(n => n.sourceIds))].filter(id => !currentNodes.has(`source:${id}`)).flatMap(id => {
       const source = corpus.sources.find(s => s.id === id);
       return source ? [{ id: `source:${id}`, label: source.title, type: "document", layer: source.layer, community: "Your uploads", sourceIds: [id], description: "Source document with independently reviewed teaching nodes.", degree: 0 }] : [];
     });
-    const allEdges = [...corpus.edges, ...edges], degrees = new Map<string, number>();
+    const edgeMerge = mergeGraphEdges(corpus.edges, edges);
+    const allEdges = edgeMerge.edges, degrees = new Map<string, number>();
     for (const edge of allEdges) { degrees.set(edge.source, (degrees.get(edge.source) ?? 0) + 1); degrees.set(edge.target, (degrees.get(edge.target) ?? 0) + 1); }
-    return { ...corpus, importedAt: stamp(), nodes: [...corpus.nodes, ...sourceNodes, ...nodes].map(n => ({ ...n, degree: degrees.get(n.id) ?? 0 })), edges: allEdges,
-      knowledgeCommits: { ...corpus.knowledgeCommits, [receipt]: { nodes: nodes.length, edges: edges.length, audits: fragment.audits, warnings: fragment.warnings, usage } } };
+    return { ...corpus, importedAt: stamp(), nodes: [...merged.nodes, ...sourceNodes].map(n => ({ ...n, degree: degrees.get(n.id) ?? 0 })), edges: allEdges,
+      knowledgeCommits: { ...corpus.knowledgeCommits, [receipt]: { nodes: merged.added, edges: edgeMerge.added, audits, warnings: merged.merged ? [...fragment.warnings, `${merged.merged} exact repeated teaching(s) merged with existing nodes; additional source evidence retained.`] : fragment.warnings, usage } } };
   });
   invalidateCorpus(brainId);
   return updated.knowledgeCommits![receipt];
@@ -313,6 +331,7 @@ async function appendFragment(brainId: string, job: KnowledgeJob, batch: Batch, 
 export async function stepKnowledgeJob(id: string, brainId: string) {
   const initial = await readJob(id, brainId), corpus = (await readRecord<Corpus>(brainKey(brainId, "corpus.json")))?.value ?? await getCorpus(brainId), settings = await getSettings();
   if (!settings.apiKey || settings.provider !== initial.provider || settings.model !== initial.model) throw new HttpError(422, "The model connection changed. Restore this job's provider and model in Settings before resuming; its writing instructions were not changed.");
+  const imageCeiling = ["queued", "running"].includes(initial.stage) && initial.batches.some(batch => batch.state === "pending" && batch.passageIds.some(id => corpus.passages.some(passage => passage.id === id && passage.image))) ? await imageContextCeiling(settings.model) : 0;
   const token = randomUUID();
   let claimedId: string | undefined;
   const claimed = await updateRecord(jobKey(brainId, id), initial, job => {
@@ -324,8 +343,8 @@ export async function stepKnowledgeJob(id: string, brainId: string) {
     const batch = job.batches.find(b => b.state === "pending" && b.phase === "verify") ?? job.batches.find(b => b.state === "pending" && b.phase === "review") ?? job.batches.find(b => b.state === "pending");
     if (!batch) { updateStage(job); return job; }
     const passages = batch.passageIds.map(id => corpus.passages.find(p => p.id === id));
-    if (passages.some((p, index) => !p || hash(p.text) !== job.passageHashes[batch.passageIds[index]])) throw new HttpError(409, "A source passage changed or disappeared. Start a new extraction from the current document.");
-    const reservation = reserveFor(promptFor(job, batch, passages as Passage[], corpus));
+    if (passages.some((p, index) => !p || knowledgePassageHash(p) !== job.passageHashes[batch.passageIds[index]])) throw new HttpError(409, "A source passage or original image fingerprint changed or disappeared. Start a new extraction from the current document.");
+    const reservation = reserveFor(promptFor(job, batch, passages as Passage[], corpus), passages.some(passage => passage?.image) ? imageCeiling : 0);
     const outstanding = job.batches.reduce((n, b) => n + (b.lease?.reservation ?? 0), 0);
     if (job.costUsd + outstanding + reservation > job.budgetUsd) { job.stage = "paused-budget"; job.error = "The remaining safety budget cannot reserve another bounded model call. Progress is saved. Raise the cap explicitly to continue."; job.updatedAt = stamp(); return job; }
     batch.lease = { token, expiresAt: Date.now() + LEASE_MS, reservation }; batch.state = "leased"; batch.attempts += 1; claimedId = batch.id;
@@ -340,10 +359,13 @@ export async function stepKnowledgeJob(id: string, brainId: string) {
   let reviewedCandidate: KnowledgeReview | undefined;
   let reviewed: Fragment | undefined;
   let receipt: Receipt | undefined;
+  let providerRequested = false;
   try {
-    const response = await fetch(connection.url, { method: "POST", headers: connection.headers, signal: AbortSignal.timeout(65_000),
+    const messages = await imageMessages(promptFor(claimed, batch, passages, corpus), passages);
+    providerRequested = true;
+    const response = await fetch(connection.url, { method: "POST", headers: connection.headers, signal: AbortSignal.timeout(85_000),
       body: JSON.stringify({ model: settings.model, temperature: 0, max_tokens: MAX_COMPLETION_TOKENS, ...connection.options,
-        provider: { max_price: { prompt: 0.35, completion: 1.4, request: 0 }, sort: "throughput" }, usage: { include: true }, response_format: { type: "json_object" }, messages: promptFor(claimed, batch, passages, corpus) }) });
+        provider: { max_price: { prompt: 0.35, completion: 1.4, request: 0 }, sort: "throughput" }, usage: { include: true }, response_format: { type: "json_object" }, messages }) });
     if (!response.ok) { if ([400, 401, 402, 403, 404, 429].includes(response.status)) fatalStatus = response.status; throw new Error(modelError(connection.label, response.status)); }
     const result = await response.json(); usage = result.usage;
     if (result.error) { const status = Number(result.error.code) || 502; if ([400, 401, 402, 403, 404, 429].includes(status)) fatalStatus = status; throw new Error(modelError(connection.label, status)); }
@@ -355,12 +377,14 @@ export async function stepKnowledgeJob(id: string, brainId: string) {
       if (!batch.candidate) throw new Error("The extraction candidate was not saved; retry this batch.");
       if (!batch.review) throw new Error("The omission review was not saved; retry this batch.");
       reviewed = independentlyVerifiedFragment(batch.candidate, batch.review, finalVerificationSchema.parse(parsed), passages, id, corpus);
+      if (reviewed.audits.some(audit => audit.disposition === "unresolved")) await writeRecord(brainKey(brainId, `knowledge/review/${id}-${batch.id}-${batch.revision}.json`), { candidate: batch.candidate, review: batch.review, verification: parsed, audits: reviewed.audits, imageIds: passages.map(passage => passage.image?.id).filter(Boolean) });
       const current = await readJob(id, brainId);
       if (current.batches.find(b => b.id === batch.id)?.lease?.token !== token) throw new Error("This request lost its lease. No unowned result was saved.");
       receipt = await appendFragment(brainId, claimed, batch, reviewed, { ...accountedUsage(usage, batch.lease!.reservation), token });
     }
     resultAccepted = true;
   } catch (error) {
+    if (!providerRequested) usage = { cost: 0, prompt_tokens: 0, completion_tokens: 0 };
     const schemaIssues = error instanceof Error && error.name === "ZodError" ? (error as unknown as { issues: { path: (string | number)[]; message: string }[] }).issues?.slice(0, 5).map(issue => `${issue.path.join(".")}: ${issue.message}`).join("; ") : "";
     failure = error instanceof Error && error.name === "ZodError" ? `The model returned invalid extraction data. No partial result was accepted. ${schemaIssues}`.slice(0, 500) : error instanceof SyntaxError ? "The model returned malformed JSON. No partial result was accepted." : error instanceof Error && ["TimeoutError", "AbortError"].includes(error.name) ? "The model timed out; this bounded call may have been billed. Progress is saved and the batch can retry." : error instanceof Error ? error.message.slice(0, 500) : "The extraction request failed.";
     failure = failure.replace(/Bearer\s+\S+|sk-(?:or-)?[\w-]+/gi, "[redacted]");
@@ -370,6 +394,7 @@ export async function stepKnowledgeJob(id: string, brainId: string) {
     const currentBatch = job.batches.find(b => b.id === batch.id)!;
     if (currentBatch.lease?.token !== token) return job;
     applyAccounting(job, token, accounted);
+    if (providerRequested && passages.some(passage => passage.image)) logActivity(job, "image-input", `Sent ${passages.filter(passage => passage.image).length} original page image(s) to ${job.model} for ${batch.phase}; source bytes matched the recorded SHA256 fingerprint.`, batch.passageIds);
     if (!accounted.measured) addWarning(job, "At least one call did not return a measured dollar cost. Safety spend includes conservative accounting rather than claiming exact provider billing.");
     currentBatch.lease = undefined;
     if (resultAccepted && extracted) { currentBatch.candidate = extracted; currentBatch.phase = "review"; currentBatch.state = "pending"; currentBatch.attempts = 0; currentBatch.error = undefined; }
