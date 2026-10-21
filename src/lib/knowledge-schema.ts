@@ -32,6 +32,7 @@ export type Teaching = z.infer<typeof teachingSchema>;
 export type Extraction = z.infer<typeof extractionSchema>;
 export type KnowledgeReview = z.infer<typeof reviewSchema>;
 export type PassageAudit = KnowledgePassageAudit;
+export const granularityInstructions = `Granularity audit: one independently useful interpretation, correspondence, condition, exception, or fact per node. Do not bundle an orbit period, eccentricity, psychological interpretation and chart-placement rule into one node just because they share a planet. Split each decan correspondence into its own node while retaining a separate complete worked procedure when useful. Preserve every necessary qualification with its individual rule. Claims about scientific proof, biology, medicine, or physical causation made by the author must be explicitly identified as the author's claim or symbolic framework, not established fact. Schema limits: label <=180 characters, topic <=100, text <=3500, each quote 12..1800, each alias <=100, <=12 aliases, <=8 evidence quotes per teaching. Use ONLY the documented kind and applicationTags enums. A verifier must mark a passage incomplete if distinct teachings remain bundled in a way that prevents individual lookup.`;
 export const finalVerificationSchema = z.object({
   teachings: z.array(z.object({ key: z.string().max(100), supported: z.boolean(), reason: z.string().min(3).max(900) })).max(300),
   relationships: z.array(z.object({ index: z.number().int().min(0), supported: z.boolean(), reason: z.string().min(3).max(900) })).max(200),

@@ -9,6 +9,7 @@ import { getSettings } from "./model";
 import { modelConnection, modelError } from "./model-provider";
 import { listRecords, readRecord, updateRecord } from "./storage";
 import { applicationInstructions, extractionSchema, extractionShape, finalVerificationInstructions, finalVerificationSchema, independentlyVerifiedFragment, knowledgeInstructions, reviewSchema, reviewShape, type Extraction, type KnowledgeReview, type PassageAudit } from "./knowledge-schema";
+import { granularityInstructions } from "./knowledge-schema";
 
 const LEASE_MS = 110_000;
 const MAX_COMPLETION_TOKENS = 12_000;
@@ -127,7 +128,7 @@ export async function createKnowledgeJob(input: { sourceIds: string[]; requireme
   const batches: Batch[] = [];
   for (let offset = 0; offset < passages.length; offset += BATCH_SIZE) batches.push({ id: `${offset / BATCH_SIZE}`, passageIds: passages.slice(offset, offset + BATCH_SIZE).map(p => p.id), phase: "extract", state: "pending", attempts: 0, revision: 0 });
   const inputEstimate = passages.reduce((n, p) => n + p.text.length, 0) / 3;
-  const estimatedTotalCostUsd = round(inputEstimate * INPUT_RATE * 4 + batches.length * MAX_COMPLETION_TOKENS * OUTPUT_RATE * 2);
+  const estimatedTotalCostUsd = round(inputEstimate * INPUT_RATE * 4 + batches.length * MAX_COMPLETION_TOKENS * OUTPUT_RATE * 3);
   const job: KnowledgeJob = { version: 1, id, brainId, sourceIds, author, createdAt: now, updatedAt: now, stage: "queued", provider: settings.provider, model: settings.model,
     requirements, budgetUsd, costUsd: 0, measuredCostUsd: 0, estimatedCostUsd: 0, estimatedTotalCostUsd, inputTokens: 0, outputTokens: 0, nodesAdded: 0, edgesAdded: 0, accountedCalls: [],
     passages: passages.map(p => ({ passageId: p.id, sourceId: p.sourceId, page: p.page, disposition: "pending", reason: "Not yet independently reviewed.", nodeIds: [] })),
@@ -187,7 +188,7 @@ function promptFor(job: KnowledgeJob, batch: Batch, passages: Passage[], corpus:
   const lines = job.requirements.split(/\r?\n/).map(text => ({ text, score: (text.toLowerCase().match(/[\p{L}\p{N}']{4,}/gu) ?? []).reduce((n, term) => n + Number(vocabulary.has(term)), 0) })).filter(v => v.score > 0).sort((a, b) => b.score - a.score);
   const requirements = lines.slice(0, 24).map(v => v.text).join("\n").slice(0, 6000);
   return [
-    { role: "system", content: `${knowledgeInstructions}\n${applicationInstructions}\n${batch.phase === "extract" ? extractionShape : batch.phase === "review" ? reviewShape : finalVerificationInstructions}` },
+    { role: "system", content: `${knowledgeInstructions}\n${applicationInstructions}\n${granularityInstructions}\n${batch.phase === "extract" ? extractionShape : batch.phase === "review" ? reviewShape : finalVerificationInstructions}` },
     { role: "user", content: JSON.stringify({ sourcePolicy: "Extract all teachings whether or not a wish-list question mentions them. Boundary context may clarify meaning but cite ONLY the supplied target passages, which are the ones audited in this batch.", coverageWishListNotEvidence: requirements,
       targetPassages: passages.map(p => ({ id: p.id, sourceId: p.sourceId, page: p.page, section: p.section, text: p.text })),
       boundaryContextNotTarget: boundary.map(p => ({ page: p.page, text: p.text.slice(0, 2200) })),
