@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import type { Corpus, GraphEdge, GraphNode, KnowledgeEvidence, KnowledgePassageAudit, Passage } from "./types";
-import { isUsefulTeaching, nonTeachingNodeReason } from "./knowledge-usefulness";
+import { isUsefulTeaching, nonTeachingNodeReason, substantiveTeachingClasses } from "./knowledge-usefulness";
 
 // Reasons and gaps are bounded processing notes, not teachings or source evidence.
 // A verbose explanation must not force another paid extraction of valid material.
@@ -47,7 +47,7 @@ export type KnowledgeReview = z.infer<typeof reviewSchema>;
 export type PassageAudit = KnowledgePassageAudit;
 export const granularityInstructions = `Granularity audit: one independently useful interpretation, correspondence, condition, exception, or fact per node. Do not bundle an orbit period, eccentricity, psychological interpretation and chart-placement rule into one node just because they share a planet. Split each decan correspondence into its own node while retaining a separate complete worked procedure when useful. Preserve every necessary qualification with its individual rule. Claims about scientific proof, biology, medicine, or physical causation made by the author must be explicitly identified as the author's claim or symbolic framework, not established fact. Schema limits: label <=180 characters, topic <=100, text <=3500, each quote 12..1800, each alias <=100, <=12 aliases, <=8 evidence quotes per teaching. Use ONLY the documented kind and applicationTags enums. A verifier must mark a passage incomplete if distinct teachings remain bundled in a way that prevents individual lookup.`;
 export const finalVerificationSchema = z.object({
-  teachings: z.array(z.object({ key: z.string().max(100), supported: z.boolean(), duplicateOf: z.string().max(180).optional(), reason: processingNote(), usefulness: z.object({ decision: z.enum(["teaching", "book-metadata", "author-commentary", "nonteaching-story", "uncertain"]), reason: processingNote(10), applicationQuestion: z.string().max(500).optional() }).optional() })).max(300),
+  teachings: z.array(z.object({ key: z.string().max(100), supported: z.boolean(), duplicateOf: z.string().max(180).optional(), reason: processingNote(), usefulness: z.object({ decision: z.enum(["teaching", "book-metadata", "author-commentary", "nonteaching-story", "uncertain"]), reason: processingNote(10), applicationQuestion: z.string().max(500).optional(), teachingClass: z.enum(substantiveTeachingClasses).optional(), technicalStatement: processingNote(20).optional() }).optional() })).max(300),
   relationships: z.array(z.object({ index: z.number().int().min(0), supported: z.boolean(), reason: processingNote() })).max(200),
   passages: z.array(z.object({ passageId: z.string().max(180), complete: z.boolean(), reason: processingNote() })).max(30),
   gaps: z.array(processingNote(0)).max(40).default([]),
@@ -99,7 +99,10 @@ export function independentlyVerifiedFragment(candidate: Extraction, review: Kno
   }));
   for (const node of fragment.nodes) {
     const assessment = verification.teachings.find(check => byKey.get(check.key) === node.id)?.usefulness;
-    if (assessment?.decision === "teaching") node.applicationQuestion = assessment.applicationQuestion;
+    if (assessment?.decision === "teaching") {
+      node.applicationQuestion = assessment.applicationQuestion;
+      node.knowledgeUse = { policy: "substantive-teachings-v2", teachingClass: assessment.teachingClass!, technicalStatement: assessment.technicalStatement! };
+    }
   }
   // The final independent reviewer may identify a strictly equivalent existing
   // atomic claim. Never use fuzzy text similarity to merge different conditions.

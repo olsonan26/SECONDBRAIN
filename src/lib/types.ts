@@ -46,6 +46,7 @@ export interface GraphNode {
   degree: number;
   knowledgeKind?: string;
   applicationQuestion?: string;
+  knowledgeUse?: { policy: "substantive-teachings-v2"; teachingClass: string; technicalStatement: string };
   aliases?: string[];
   applicationTags?: string[];
   evidence?: KnowledgeEvidence[];

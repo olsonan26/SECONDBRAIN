@@ -53,7 +53,7 @@ test("independent final duplicate checks merge equivalent wording without losing
   const b = { ...a, key: "b", label: "180-degree opposition", text: "The Opposition angle is shown as 180 degrees." };
   const candidate = extractionSchema.parse({ teachings: [a, b], passages: [{ passageId: passage.id, disposition: "extracted", reason: "Heading is legible." }] });
   const review = reviewSchema.parse({ checks: [{ key: "a", supported: true, reason: "Visible heading." }, { key: "b", supported: true, reason: "Visible heading." }], passages: candidate.passages, reviewComplete: true });
-  const usefulness = { decision: "teaching", reason: "The exact aspect angle is useful in chart calculation.", applicationQuestion: "What is the angle of an opposition?" };
+  const usefulness = { decision: "teaching", teachingClass: "correspondence", technicalStatement: "The Opposition heading specifies an angle of 180 degrees.", reason: "The exact aspect angle is useful in chart calculation.", applicationQuestion: "What is the angle of an opposition?" };
   const verification = finalVerificationSchema.parse({ teachings: [{ key: "a", supported: true, reason: "Exactly matches image.", usefulness }, { key: "b", supported: true, duplicateOf: "a", reason: "Same angle with no distinct conditions.", usefulness }], relationships: [], passages: [{ passageId: passage.id, complete: true, reason: "All visible heading knowledge retained." }] });
   const fragment = independentlyVerifiedFragment(candidate, review, verification, [passage], "job", { version: 1, importedAt: "", snapshotDate: "", sources: [], passages: [passage], nodes: [], edges: [], warnings: [] });
   assert.equal(fragment.nodes.length, 1); assert.equal(fragment.audits[0].nodeIds.length, 1);

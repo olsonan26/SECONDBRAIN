@@ -1,7 +1,7 @@
 import type { Corpus, GraphNode, GraphEdge, KnowledgePassageAudit } from "./types";
 import { nonTeachingNodeReason } from "./knowledge-usefulness";
 
-export const curationPolicy = "useful-teachings-v1";
+export const curationPolicy = "useful-teachings-v2";
 export function planKnowledgeCuration(corpus: Corpus) {
   const nodes = corpus.nodes.filter(node => node.type === "teaching" && nonTeachingNodeReason(node));
   const ids = new Set(nodes.map(node => node.id));
@@ -18,6 +18,6 @@ export function curateJob<T extends CuratableJob>(job: T, nodes: GraphNode[], ed
   const ids = new Set(nodes.map(node => node.id));
   return { ...job, nodesAdded: Math.max(0, job.nodesAdded - nodes.length), edgesAdded: Math.max(0, job.edgesAdded - edges.length), curationApplied: [...(job.curationApplied ?? []), curationPolicy], passages: job.passages.map(audit => {
     const kept = audit.nodeIds.filter(id => !ids.has(id));
-    return kept.length === audit.nodeIds.length ? audit : { ...audit, nodeIds: kept, ...(kept.length ? {} : { disposition: "excluded-noise" as const, reason: "Owner's useful-teaching policy: publication and author commentary archived, not chart-reading knowledge." }) };
+    return kept.length === audit.nodeIds.length ? audit : { ...audit, nodeIds: kept, ...(kept.length ? {} : { disposition: "excluded-noise" as const, reason: "Owner's substantive-teaching policy: nontechnical naming, framing, story or form inventory excluded from chart-reading knowledge." }) };
   }) };
 }
