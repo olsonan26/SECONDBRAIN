@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { parseJsonRequest } from "@/lib/json-request";
 import { getSession, requireUser, checkOrigin, HttpError, login } from "@/lib/auth";
 import { workspace, ask, createDraft, runWorkflow } from "@/lib/workspace";
 import { getCorpus } from "@/lib/corpus";
@@ -22,9 +23,9 @@ type Context = { params: Promise<{ segments: string[] }> };
 const scopeSchema = z.array(z.string().max(150)).max(300).default([]);
 const questionSchema = z.string().trim().min(3).max(3000);
 const json = (body: unknown, status = 200) => Response.json(body, { status, headers: { "Cache-Control": "private, no-store" } });
-async function body(request: Request) {
+async function body(request: Request, allowEmpty = false) {
   if (Number(request.headers.get("content-length") ?? 0) > 150_000) throw new HttpError(413, "This request is too large.");
-  return request.json();
+  return parseJsonRequest(request, allowEmpty);
 }
 async function handle(request: Request, context: Context) {
   try {
@@ -93,7 +94,7 @@ async function handle(request: Request, context: Context) {
         if (knowledgeAction[2] === "step") return json(await stepKnowledgeJob(id, brainId));
         if (knowledgeAction[2] === "pause") return json(await pauseKnowledgeJob(id, brainId));
         if (knowledgeAction[2] === "resume") {
-          const input = z.object({ budgetUsd: z.number().min(0.05).max(10).optional() }).parse(await body(request));
+          const input = z.object({ budgetUsd: z.number().min(0.05).max(10).optional() }).parse(await body(request, true));
           return json(await resumeKnowledgeJob(id, brainId, input));
         }
       }

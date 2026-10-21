@@ -4,6 +4,7 @@ import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { AlertCircle, BookOpen, Check, ChevronDown, LoaderCircle, Network, Pause, Play, RefreshCw, Sparkles } from "lucide-react";
 import type { GraphNode, Source, KnowledgeJobSummary, KnowledgeStage } from "@/lib/types";
 import KnowledgeJobControls from "./knowledge-job-controls";
+import { jsonRequestInit } from "@/lib/json-request";
 
 interface ExtractionProps {
   brainId: string;
@@ -26,10 +27,7 @@ const stageLabel: Record<KnowledgeStage, string> = {
 const isActive = (job: KnowledgeJobSummary) => job.stage === "running" || job.stage === "queued";
 
 async function request<T>(brainId: string, path: string, method = "GET", body?: unknown, signal?: AbortSignal): Promise<T> {
-  const response = await fetch(`/api/knowledge/jobs${path}?brain=${encodeURIComponent(brainId)}`, {
-    method, signal, headers: body === undefined ? undefined : { "Content-Type": "application/json" },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
+  const response = await fetch(`/api/knowledge/jobs${path}?brain=${encodeURIComponent(brainId)}`, jsonRequestInit(method, body, signal));
   const payload = await response.json().catch(() => ({ error: "The extraction server returned an unreadable response. Your saved progress is unchanged." }));
   if (!response.ok) throw new Error(payload.error || "Could not update this extraction job.");
   return payload as T;

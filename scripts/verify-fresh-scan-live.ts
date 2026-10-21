@@ -26,7 +26,40 @@ async function main() {
       await page.goto(`${origin}/?brain=${RECOVERED_ASTROLOGY_ID}`);await page.getByRole("button",{name:"Knowledge extraction",exact:true}).click();
       await expect(page.getByRole("heading",{name:"Full-book pass 1 of 3"})).toBeVisible({timeout:30000});
       await expect(page.getByText("Scanning locked until recovery",{exact:true})).toHaveCount(0);
-      if(name==="Alex") await expect(page.getByRole("button",{name:"Resume",exact:true})).toBeEnabled();
+      if(name==="Alex") {
+        await expect(page.getByRole("button",{name:"Resume",exact:true})).toBeEnabled();
+        let interceptedSteps=0;
+        // Exercise the real Resume endpoint, but never let verification purchase a model call.
+        await context.route("**/api/knowledge/jobs/*/step?**",async route=>{
+          interceptedSteps++;
+          await route.fulfill({status:200,contentType:"application/json",body:JSON.stringify({...job,stage:"paused"})});
+        });
+        const endpoint=`${origin}/api/knowledge/jobs/${policy.jobId}`;
+        try {
+          const responsePromise=page.waitForResponse(r=>r.url().includes(`/${policy.jobId}/resume?`)&&r.request().method()==="POST");
+          await page.getByRole("button",{name:"Resume",exact:true}).click();
+          const response=await responsePromise;
+          assert.equal(response.status(),200,"Actual Resume button must succeed");
+          assert.deepEqual(response.request().postDataJSON(),{});
+          await expect.poll(()=>interceptedSteps).toBeGreaterThan(0);
+        } finally {
+          await page.close();
+          const paused=await context.request.post(`${endpoint}/pause?brain=${RECOVERED_ASTROLOGY_ID}`,{headers:{Origin:origin},data:{}});
+          assert.equal(paused.status(),200);
+        }
+        // A stale browser may still send no body; only optional Resume input accepts that.
+        const legacy=await context.request.post(`${endpoint}/resume?brain=${RECOVERED_ASTROLOGY_ID}`,{headers:{Origin:origin}});
+        try { assert.equal(legacy.status(),200,"Empty legacy Resume must work"); }
+        finally { assert.equal((await context.request.post(`${endpoint}/pause?brain=${RECOVERED_ASTROLOGY_ID}`,{headers:{Origin:origin},data:{}})).status(),200); }
+        const malformed=await context.request.post(`${endpoint}/resume?brain=${RECOVERED_ASTROLOGY_ID}`,{headers:{Origin:origin,"Content-Type":"application/json"},data:"{"});
+        assert.equal(malformed.status(),400);
+        const after=await (await context.request.get(`${endpoint}?brain=${RECOVERED_ASTROLOGY_ID}`)).json();
+        assert.equal(after.stage,"paused");
+        for(const key of ["costUsd","processedPassages","budgetUsd"]) assert.equal(after[key],job[key],`${key} must remain unchanged`);
+        console.log(JSON.stringify({actualResumeVerified:true,legacyResumeVerified:true,malformedJsonRejected:true,paidCallsStarted:0}));
+        await context.close();
+        continue;
+      }
       else await expect(page.getByRole("button",{name:"Resume",exact:true})).toHaveCount(0);
       await expect(page.getByRole("region",{name:"Model spending"})).toContainText("Fresh scan extraction");
       assert.deepEqual(errors,[]);mkdirSync("private/migration/fresh-scan",{recursive:true});await page.screenshot({path:`private/migration/fresh-scan/${name.toLowerCase()}-ready.png`,fullPage:true});
