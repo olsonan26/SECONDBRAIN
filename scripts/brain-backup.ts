@@ -134,12 +134,23 @@ async function cloudEntries(directory: string) {
 }
 async function main() {
   const [mode, directoryArgument, tagArgument] = process.argv.slice(2);
-  if (mode === "local" || mode === "cloud") {
+  if (mode === "local" || mode === "cloud" || mode === "seed") {
     const directory = directoryArgument ? path.resolve(directoryArgument) : path.join(root, `${mode}-${new Date().toISOString().replace(/[:.]/g, "-")}`);
-    const key = await recoveryKey(mode === "local");
-    const entries = mode === "local" ? await localEntries() : await cloudEntries(directory);
+    const key = await recoveryKey(mode !== "cloud");
+    let entries = mode === "cloud" ? await cloudEntries(directory) : await localEntries();
+    if (mode === "seed") {
+      const photos = entries.filter(entry => entry.name.startsWith("original-page-photographs/") && entry.name.endsWith(".jpg"));
+      const plan = [];
+      for (const photo of photos) plan.push({ name: photo.name, driveId: path.basename(photo.source, ".jpg"), bytes: (await stat(photo.source)).size, sha256: await fileHash(photo.source), mimeType: "image/jpeg" });
+      const planPath = path.join(root, "recovery-source-plan.json");
+      await mkdir(root, { recursive: true });
+      await writeFile(planPath, JSON.stringify(plan), { mode: 0o600 });
+      entries = entries.filter(entry => !photos.includes(entry));
+      entries.push({ source: planPath, name: "recovery-source-plan.json" });
+    }
     console.log(JSON.stringify({ phase: "archiving", kind: mode, files: entries.length, directory, completeCloudState: mode === "cloud" }));
-    const manifest = await createBackup(entries, directory, key, { completeCloudState: mode === "cloud", description: mode === "local" ? "Original source files, OCR, local Main corpus, and encrypted recovery configuration. NOT the current cloud drafts, Astrology nodes, or scan checkpoint." : "Complete retrieved live workspace records and uploaded originals; immutable page photos are in the separate source archive." });
+    const description = mode === "seed" ? "Encrypted seed for direct Drive-to-GitHub assembly. Original photographs are referenced by exact hashes but NOT included in this seed. NOT a complete workspace backup." : mode === "local" ? "Original source files, OCR, local Main corpus, and encrypted recovery configuration. NOT the current cloud drafts, Astrology nodes, or scan checkpoint." : "Complete retrieved live workspace records and uploaded originals; immutable page photos are in the separate source archive.";
+    const manifest = await createBackup(entries, directory, key, { completeCloudState: mode === "cloud", description });
     console.log(JSON.stringify({ phase: "archive-created", directory, files: manifest.files, bytes: manifest.originalBytes, parts: manifest.parts.length, completeCloudState: manifest.completeCloudState, recoveryKeyFile: mode === "local" ? keyPath : "existing key" }));
   } else if (mode === "restore") {
     if (!directoryArgument || !tagArgument) throw new Error("Usage: restore ARCHIVE_DIRECTORY NEW_DESTINATION");
@@ -185,6 +196,6 @@ async function main() {
     await command(["secret", "set", "BRAIN_BACKUP_KEY", "--repo", repository], key.toString("base64url"));
     for (const name of ["BLOB_READ_WRITE_TOKEN", "BRAIN_SUPABASE_GATEWAY_TOKEN", "BRAIN_SUPABASE_URL"]) if (process.env[name]) await command(["secret", "set", name, "--repo", repository], process.env[name]);
     console.log(JSON.stringify({ repositorySecretsStored: true, plaintextPublished: false }));
-  } else throw new Error("Choose local, cloud, restore, publish, or install-secrets");
+  } else throw new Error("Choose local, seed, cloud, restore, publish, or install-secrets");
 }
 main().catch(error => { console.error(error instanceof Error ? error.message : "Backup failed; no complete snapshot was published"); process.exitCode = 1; });

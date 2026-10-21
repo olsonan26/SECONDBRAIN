@@ -5,8 +5,12 @@ on:
       operation:
         description: Verify backup tools, or create a real cloud snapshot
         type: choice
-        options: [snapshot, verify-tools]
+        options: [snapshot, verify-tools, assemble-sources]
         default: snapshot
+      seed_tag:
+        description: Encrypted seed release for source assembly (only used by assemble-sources)
+        type: string
+        default: brain-backup-source-seed-20261021
       backend:
         description: Source containing the real workspace (empty/unmigrated storage is rejected)
         type: choice
@@ -23,7 +27,7 @@ jobs:
   snapshot:
     # Automatic runs stay disabled until the real workspace has been recovered.
     # Manual runs remain available and fail visibly if source reads are blocked.
-    if: github.event_name == 'workflow_dispatch' || vars.BRAIN_BACKUP_ENABLED == 'true'
+    if: inputs.operation != 'assemble-sources' && (github.event_name == 'workflow_dispatch' || vars.BRAIN_BACKUP_ENABLED == 'true')
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -50,3 +54,22 @@ jobs:
           node --import tsx scripts/brain-backup.ts cloud private/github-backups/cloud
           node --import tsx scripts/brain-backup.ts restore private/github-backups/cloud private/github-backups/restored-verification
           node --import tsx scripts/brain-backup.ts publish private/github-backups/cloud "brain-backup-cloud-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+  original-sources:
+    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'assemble-sources'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - name: Assemble and verify original sources directly from Drive
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BRAIN_BACKUP_KEY: ${{ secrets.BRAIN_BACKUP_KEY }}
+          BRAIN_SOURCE_SEED_TAG: ${{ inputs.seed_tag }}
+        run: node --import tsx scripts/assemble-source-backup.ts
