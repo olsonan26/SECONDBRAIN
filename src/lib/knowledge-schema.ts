@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import type { Corpus, GraphEdge, GraphNode, KnowledgeEvidence, KnowledgePassageAudit, Passage } from "./types";
+import { isUsefulTeaching, nonTeachingNodeReason } from "./knowledge-usefulness";
 
 export const knowledgeEvidenceSchema = z.object({ passageId: z.string().min(1).max(180), quote: z.string().max(1800).default(""), imageId: z.string().max(180).optional(), visualObservation: z.string().min(20).max(1800).optional() }).refine(value => value.quote.length >= 12 || Boolean(value.imageId && value.visualObservation), "Provide an exact source quote or a specific observation tied to the attached original image.");
 const teachingSchema = z.object({
@@ -36,7 +37,7 @@ export type KnowledgeReview = z.infer<typeof reviewSchema>;
 export type PassageAudit = KnowledgePassageAudit;
 export const granularityInstructions = `Granularity audit: one independently useful interpretation, correspondence, condition, exception, or fact per node. Do not bundle an orbit period, eccentricity, psychological interpretation and chart-placement rule into one node just because they share a planet. Split each decan correspondence into its own node while retaining a separate complete worked procedure when useful. Preserve every necessary qualification with its individual rule. Claims about scientific proof, biology, medicine, or physical causation made by the author must be explicitly identified as the author's claim or symbolic framework, not established fact. Schema limits: label <=180 characters, topic <=100, text <=3500, each quote 12..1800, each alias <=100, <=12 aliases, <=8 evidence quotes per teaching. Use ONLY the documented kind and applicationTags enums. A verifier must mark a passage incomplete if distinct teachings remain bundled in a way that prevents individual lookup.`;
 export const finalVerificationSchema = z.object({
-  teachings: z.array(z.object({ key: z.string().max(100), supported: z.boolean(), duplicateOf: z.string().max(180).optional(), reason: z.string().min(3).max(900) })).max(300),
+  teachings: z.array(z.object({ key: z.string().max(100), supported: z.boolean(), duplicateOf: z.string().max(180).optional(), reason: z.string().min(3).max(900), usefulness: z.object({ decision: z.enum(["teaching", "book-metadata", "author-commentary", "nonteaching-story", "uncertain"]), reason: z.string().min(10).max(900), applicationQuestion: z.string().max(500).optional() }).optional() })).max(300),
   relationships: z.array(z.object({ index: z.number().int().min(0), supported: z.boolean(), reason: z.string().min(3).max(900) })).max(200),
   passages: z.array(z.object({ passageId: z.string().max(180), complete: z.boolean(), reason: z.string().min(3).max(900) })).max(30),
   gaps: z.array(z.string().max(900)).max(40).default([]),
@@ -55,8 +56,17 @@ export const finalVerificationInstructions = `You are the final independent enta
 
 export function independentlyVerifiedFragment(candidate: Extraction, review: KnowledgeReview, verification: FinalVerification, passages: Passage[], jobId: string, corpus: Corpus) {
   const combined = [...candidate.teachings, ...review.additions];
-  const checked = (key: string) => { const values = verification.teachings.filter(v => v.key === key); return values.length === 1 && values[0].supported; };
+  const checked = (key: string) => {
+    const values = verification.teachings.filter(v => v.key === key);
+    const teaching = combined.find(t => t.key === key);
+    return values.length === 1 && values[0].supported && Boolean(teaching && isUsefulTeaching({ label: teaching.label, description: teaching.text }, values[0].usefulness));
+  };
   const firstReview = (key: string) => { const values = review.checks.filter(v => v.key === key); return values.length === 1 && values[0].supported; };
+  const excluded = new Set(combined.filter(teaching => {
+    const values = verification.teachings.filter(v => v.key === teaching.key);
+    return values.length === 1 && values[0].supported && (!candidate.teachings.includes(teaching) || firstReview(teaching.key)) && validatedEvidence(teaching.evidence, passages) &&
+      (["book-metadata", "author-commentary", "nonteaching-story"].includes(values[0].usefulness?.decision ?? "") || Boolean(nonTeachingNodeReason({ label: teaching.label, description: teaching.text })));
+  }).map(teaching => teaching.key));
   const checks = combined.map(t => ({ key: t.key, supported: checked(t.key) && (!candidate.teachings.includes(t) || firstReview(t.key)), reason: "Requires both the relevant prior review and an independent final entailment check." }));
   const relationshipFailures = new Set<string>();
   const relationships = review.relationships.filter((relationship, index) => {
@@ -67,14 +77,20 @@ export function independentlyVerifiedFragment(candidate: Extraction, review: Kno
   });
   const audited = review.passages.map(audit => {
     const values = verification.passages.filter(v => v.passageId === audit.passageId);
-    return values.length === 1 && values[0].complete && !relationshipFailures.has(audit.passageId) ? audit : { ...audit, disposition: "unresolved" as const, reason: values[0]?.reason ?? "The final verification omitted or duplicated this passage." };
+    if (values.length !== 1 || !values[0].complete || relationshipFailures.has(audit.passageId)) return { ...audit, disposition: "unresolved" as const, reason: values[0]?.reason ?? "The final verification omitted or duplicated this passage." };
+    const proposals = combined.filter(teaching => teaching.evidence.some(e => e.passageId === audit.passageId));
+    return proposals.length && proposals.every(teaching => excluded.has(teaching.key)) ? { ...audit, disposition: "excluded-noise" as const, reason: "Independently reviewed as nonteaching publication metadata, commentary or story; no reusable subject knowledge was omitted." } : audit;
   });
-  const fragment = reviewFragment({ ...candidate, teachings: combined }, { ...review, checks, additions: [], relationships, passages: audited, gaps: [...review.gaps, ...verification.gaps] }, passages, jobId, corpus);
+  const fragment = reviewFragment({ ...candidate, teachings: combined.filter(teaching => !excluded.has(teaching.key)) }, { ...review, checks, additions: [], relationships, passages: audited, gaps: [...review.gaps, ...verification.gaps] }, passages, jobId, corpus);
   const byKey = new Map(combined.map(teaching => {
     const evidence = validatedEvidence(teaching.evidence, passages);
     const sourceIds = [...new Set(evidence?.map(e => e.sourceId) ?? [])];
     return [teaching.key, stableId("knowledge", `${sourceIds.sort().join("|")}|${teaching.kind}|${teaching.label.toLowerCase()}|${teaching.text}`)];
   }));
+  for (const node of fragment.nodes) {
+    const assessment = verification.teachings.find(check => byKey.get(check.key) === node.id)?.usefulness;
+    if (assessment?.decision === "teaching") node.applicationQuestion = assessment.applicationQuestion;
+  }
   // The final independent reviewer may identify a strictly equivalent existing
   // atomic claim. Never use fuzzy text similarity to merge different conditions.
   const replacements = new Map<string, string>();

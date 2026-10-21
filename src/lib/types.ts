@@ -45,6 +45,7 @@ export interface GraphNode {
   description: string;
   degree: number;
   knowledgeKind?: string;
+  applicationQuestion?: string;
   aliases?: string[];
   applicationTags?: string[];
   evidence?: KnowledgeEvidence[];
