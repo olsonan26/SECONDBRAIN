@@ -150,9 +150,11 @@ async function main() {
     const directory = path.resolve(directoryArgument), manifest = JSON.parse(await readFile(path.join(directory, "manifest.json"), "utf8")) as BackupManifest;
     for (const part of manifest.parts) if (!/^archive\.part-\d{3}\.bin$/.test(part.name) || await fileHash(path.join(directory, part.name)) !== part.sha256) throw new Error("Backup part verification failed before upload");
     const notes = `Encrypted Secondbrain recovery archive.\n\nFiles: ${manifest.files}. Original bytes: ${manifest.originalBytes}. Complete cloud state: ${manifest.completeCloudState}.\n\n${manifest.description}\n\nUse scripts/brain-backup.ts restore with the separate recovery key. The key and plaintext secrets are NOT release assets. No AI calls are needed to restore. Download every archive.part file and manifest.json. Never overwrite a live workspace before verifying the restore.\n`;
-    let previous: { draft: boolean; assets: { name: string; size: number; digest: string }[] } | undefined;
-    try { previous = JSON.parse(await command(["api", `repos/${repository}/releases/tags/${tagArgument}`])); }
-    catch (error) { if (!(error instanceof Error) || !error.message.includes("404")) throw error; }
+    // Drafts have no published tag yet; the by-tag endpoint can return 404.
+    // Discover owned drafts through the authenticated releases listing instead.
+    type Release = { id: number; tag_name: string; draft: boolean; assets: { name: string; size: number; digest: string }[] };
+    const releases = JSON.parse(await command(["api", `repos/${repository}/releases?per_page=100`])) as Release[];
+    let previous = releases.find(release => release.tag_name === tagArgument);
     if (previous && !previous.draft) throw new Error("Release is already published; use a new tag rather than overwriting a recovery snapshot");
     if (!previous) await command(["release", "create", tagArgument, "--repo", repository, "--draft", "--prerelease", "--latest=false", "--target", "main", "--title", manifest.completeCloudState ? "Brain backup — complete cloud state" : "Brain backup — original sources (cloud state still missing)", "--notes-file", "-"], notes);
     for (const file of [...manifest.parts.map(p => p.name), "manifest.json"]) {
@@ -164,7 +166,12 @@ async function main() {
       console.log(JSON.stringify({ phase: "uploading", asset: file }));
       await command(["release", "upload", tagArgument, path.join(directory, file), "--repo", repository]);
     }
-    const assets = JSON.parse(await command(["api", `repos/${repository}/releases/tags/${tagArgument}`, "--jq", ".assets"]));
+    if (!previous) {
+      const releases = JSON.parse(await command(["api", `repos/${repository}/releases?per_page=100`])) as Release[];
+      previous = releases.find(release => release.tag_name === tagArgument);
+    }
+    if (!previous) throw new Error("Uploaded draft release could not be found");
+    const assets = JSON.parse(await command(["api", `repos/${repository}/releases/${previous.id}`, "--jq", ".assets"]));
     for (const part of manifest.parts) {
       const remote = assets.find((asset: { name: string }) => asset.name === part.name);
       if (!remote || remote.size !== part.bytes || remote.digest !== `sha256:${part.sha256}`) throw new Error("GitHub asset size/hash mismatch; release left as a draft");
