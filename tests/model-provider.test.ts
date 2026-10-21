@@ -77,3 +77,27 @@ test("real generation and evidence-review calls use the same provider and preser
   `], { encoding: "utf8", timeout: 30_000, windowsHide: true });
   assert.equal(result.status, 0, result.stderr || result.stdout);
 });
+
+test("image-backed question answers and their independent review receive original images, not OCR alone", () => {
+  const result = spawnSync(process.execPath, ["--conditions=react-server", "--import", "tsx", "--input-type=module", "-e", `
+    import assert from 'node:assert/strict';
+    import {createHash} from 'node:crypto';
+    const module=await import('./src/lib/model.ts'); const {generateGrounded}=module.default||module;
+    const bytes=Buffer.from([255,216,255,224,8,9,255,217]);
+    const citation={number:1,id:'p-image',sourceId:'s',sourceTitle:'Photographs',page:null,section:'',lineStart:1,lineEnd:1,text:'1800 Opposition: OCR is unverified.',score:1,image:{id:'original-image',driveId:'test_drive_image_1234567890',sha256:createHash('sha256').update(bytes).digest('hex'),filename:'test.jpg',mimeType:'image/jpeg'}};
+    const calls=[];
+    globalThis.fetch=async(url,options)=>{
+      if(String(url).endsWith('/models'))return Response.json({data:[{id:'test/vision',context_length:1000000,architecture:{input_modalities:['text','image']},pricing:{image:'0'}}]});
+      if(String(url).includes('drive.google.com'))return new Response(bytes,{headers:{'content-type':'image/jpeg'}});
+      const body=JSON.parse(options.body);calls.push(body);
+      assert.ok(Array.isArray(body.messages[1].content));
+      assert.ok(body.messages[1].content.some(part=>part.image_url?.url==='data:image/jpeg;base64,'+bytes.toString('base64')));
+      const value=calls.length===1?{paragraphs:[{text:'The heading specifies 180 degrees.',citations:[1],evidence:[{citation:1,imageId:'original-image',visualObservation:'The original printed heading reads 180° Opposition.'}]}]}:{checks:[{index:0,supported:true}]};
+      return Response.json({choices:[{message:{content:JSON.stringify(value)}}]});
+    };
+    const result=await generateGrounded('What is the angle?',[citation],{provider:'openrouter',model:'test/vision',apiKey:'sk-or-fixture-only',writingInstructions:''});
+    assert.equal(calls.length,2);assert.match(result.text,/180 degrees/);
+    assert.match(calls[0].messages[0].content,/EVERY paragraph citing an image-backed excerpt/);
+  `], { encoding: "utf8", timeout: 30_000, windowsHide: true });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+});
