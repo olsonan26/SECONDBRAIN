@@ -9,8 +9,9 @@ or restore data. Standard Linux Actions are free for this public repository.
 **Recovery snapshots do not mean the original cloud work was recovered.** They
 protect the source-recovered Supabase workspace and any new work saved there;
 the original Vercel-only drafts, accepted Astrology teachings, checkpoint and
-historical spending remain separately pending. Extraction stays locked until
-that checkpoint/ledger recovery is safely resolved.
+historical spending remain separately pending. A separately authorized fresh
+scan uses its own fixed job ID and additional $10 cumulative cap; it does not
+reset or claim to resume the older checkpoint. Other brains remain locked.
 
 Verified archives published on 2026-10-21:
 

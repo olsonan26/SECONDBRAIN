@@ -41,6 +41,13 @@ credential or gateway credential is exposed to the browser.
 
 ## Server configuration
 
+A separate fresh scan was authorized after source recovery. Its dedicated
+`recovery-fresh-scan.json` binds one job ID to the original photo source hash
+and a new $10 total cap across all three passes. The global recovery marker and
+unknown historical ledger remain unchanged. Only that brain/job is unlocked;
+completed scans cannot be replaced to obtain another budget. The spending UI
+labels fresh-scan totals separately from unavailable earlier spending.
+
 `BRAIN_STORAGE_BACKEND` explicitly selects `supabase`, `blob`, or `local`.
 When unset, legacy Blob/local detection is preserved. Cloud failures never fall
 back to local storage or masquerade as an empty corpus.

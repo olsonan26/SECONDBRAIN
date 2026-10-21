@@ -17,7 +17,7 @@ import { getRecoveryState } from "./recovery-state";
 
 export async function workspace(user: Workspace["user"], brainId = MAIN_BRAIN_ID): Promise<Workspace> {
   const brain = await requireBrain(brainId);
-  const [corpus, settings, drafts, runs, brains, recovery] = await Promise.all([getCorpus(brainId), getSettings(), listRecords<Draft>(brainKey(brainId, "drafts")), listRecords<Run>(brainKey(brainId, "runs")), listBrains(), getRecoveryState()]);
+  const [corpus, settings, drafts, runs, brains, recovery] = await Promise.all([getCorpus(brainId), getSettings(), listRecords<Draft>(brainKey(brainId, "drafts")), listRecords<Run>(brainKey(brainId, "runs")), listBrains(), getRecoveryState(brainId)]);
   return { user, brain, brains, recovery, sources: corpus.sources.map(({ content, ...source }) => source), ...knowledgeOverview(corpus),
     stats: { sources: corpus.sources.length, passages: corpus.passages.length, nodes: corpus.nodes.length, teachings: corpus.nodes.filter(node => node.type === "teaching").length, edges: corpus.edges.length,
       characters: corpus.sources.reduce((n, s) => n + s.characters, 0), pages: corpus.sources.reduce((n, s) => n + s.pages, 0) },

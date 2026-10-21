@@ -118,7 +118,7 @@ export async function answerKnowledgeQuestion(id: string, brainId: string, input
 }
 
 export async function startNextKnowledgePass(id: string, brainId: string) {
-  await assertExtractionRecoverySafe();
+  await assertExtractionRecoverySafe(brainId, id);
   const initial = await readJob(id, brainId), corpus = await getCorpus(brainId);
   return summary(await updateRecord(jobKey(brainId, id), initial, job => {
     releaseExpired(job);
@@ -167,7 +167,7 @@ export async function getKnowledgeJob(id: string, brainId: string) {
     batches: job.batches.map(({ id, passageIds, phase, state, attempts, error }) => ({ id, passageIds, phase, state, attempts, error })) };
 }
 export async function createKnowledgeJob(input: { sourceIds: string[]; requirements?: string; budgetUsd?: number }, brainId: string, author: string) {
-  await assertExtractionRecoverySafe();
+  const freshAuthorization = await assertExtractionRecoverySafe(brainId);
   await requireBrain(brainId);
   const budgetUsd = input.budgetUsd ?? 3; validateBudget(budgetUsd);
   if (!Array.isArray(input.sourceIds) || !input.sourceIds.length || input.sourceIds.length > 20 || input.sourceIds.some(id => typeof id !== "string")) throw new HttpError(400, "Choose one or more source documents in this brain.");
@@ -177,12 +177,14 @@ export async function createKnowledgeJob(input: { sourceIds: string[]; requireme
   if (!settings.apiKey) throw new HttpError(422, "Connect the model in Settings before starting AI knowledge extraction.");
   if (settings.provider !== "openrouter") throw new HttpError(422, "Budget-capped extraction currently requires your OpenRouter connection. Select OpenRouter in Settings.");
   const sourceIds = [...new Set(input.sourceIds)];
+  if (freshAuthorization && (budgetUsd > freshAuthorization.budgetUsd || sourceIds.length !== 1 || sourceIds[0] !== freshAuthorization.sourceId || corpus.sources.find(source => source.id === sourceIds[0])?.sha256 !== freshAuthorization.sourceSha256)) throw new HttpError(409, "This fresh authorization covers only the original page photographs and its separately approved spending cap.");
   if (sourceIds.some(id => !corpus.sources.some(s => s.id === id))) throw new HttpError(404, "A selected source is not in this brain.");
   const passages = corpus.passages.filter(p => sourceIds.includes(p.sourceId));
   if (!passages.length) throw new HttpError(422, "The selected sources have no searchable text passages.");
   const existing = await listKnowledgeJobs(brainId);
+  if (freshAuthorization && existing.some(job => job.id === freshAuthorization.jobId)) throw new HttpError(409, "The authorized fresh scan already exists. Resume its saved job; creating another job cannot reset the approved total budget.");
   if (existing.some(j => j.stage !== "complete" && j.sourceIds.some(id => sourceIds.includes(id)))) throw new HttpError(409, "An extraction job already exists for this source. Resume that job to keep its progress and spending cap.");
-  const id = randomUUID(), now = stamp();
+  const id = freshAuthorization?.jobId ?? randomUUID(), now = stamp();
   const batches = makeBatches(passages);
   const inputEstimate = passages.reduce((n, p) => n + p.text.length, 0) / 3;
   const estimatedTotalCostUsd = round(inputEstimate * INPUT_RATE * 4 + batches.length * MAX_COMPLETION_TOKENS * OUTPUT_RATE * 3);
@@ -214,7 +216,8 @@ export async function pauseKnowledgeJob(id: string, brainId: string) {
   return summary(await updateRecord(jobKey(brainId, id), initial, job => { if (!["complete", "needs-review"].includes(job.stage)) job.stage = "paused"; logActivity(job, "checkpoint", "Pause and save requested. No new model calls will start. An already-running call may finish and save its result and cost."); job.updatedAt = stamp(); return job; }));
 }
 export async function resumeKnowledgeJob(id: string, brainId: string, input: { budgetUsd?: number } = {}) {
-  await assertExtractionRecoverySafe();
+  const freshAuthorization = await assertExtractionRecoverySafe(brainId, id);
+  if (freshAuthorization && input.budgetUsd !== undefined && input.budgetUsd > freshAuthorization.budgetUsd) throw new HttpError(409, "This fresh scan cannot exceed its separately authorized total cap.");
   if (input.budgetUsd !== undefined) validateBudget(input.budgetUsd);
   const initial = await readJob(id, brainId);
   return summary(await updateRecord(jobKey(brainId, id), initial, job => {
@@ -333,8 +336,9 @@ async function appendFragment(brainId: string, job: KnowledgeJob, batch: Batch, 
 }
 
 export async function stepKnowledgeJob(id: string, brainId: string) {
-  await assertExtractionRecoverySafe();
+  const freshAuthorization = await assertExtractionRecoverySafe(brainId, id);
   const initial = await readJob(id, brainId), corpus = (await readRecord<Corpus>(brainKey(brainId, "corpus.json")))?.value ?? await getCorpus(brainId), settings = await getSettings();
+  if (freshAuthorization && (initial.budgetUsd > freshAuthorization.budgetUsd || initial.sourceIds.length !== 1 || initial.sourceIds[0] !== freshAuthorization.sourceId)) throw new HttpError(409, "This job does not match the separately authorized fresh scan and total cap.");
   if (!settings.apiKey || settings.provider !== initial.provider || settings.model !== initial.model) throw new HttpError(422, "The model connection changed. Restore this job's provider and model in Settings before resuming; its writing instructions were not changed.");
   const imageCeiling = ["queued", "running"].includes(initial.stage) && initial.batches.some(batch => batch.state === "pending" && batch.passageIds.some(id => corpus.passages.some(passage => passage.id === id && passage.image))) ? await imageContextCeiling(settings.model) : 0;
   const token = randomUUID();

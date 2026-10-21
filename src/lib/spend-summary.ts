@@ -2,6 +2,7 @@ export interface ProviderSpend { totalUsd: number | null; todayUtcUsd: number | 
 export interface SpendReport {
   checkedAt: string; providerCheckedAt?: string | null; provider: string; providerSpend: ProviderSpend | null; providerError?: string;
   historyIncomplete?: boolean;
+  freshScan?: boolean;
   extraction: { trackedUsd: number | null; measuredUsd: number | null; estimatedUsd: number | null; reservedUsd: number | null; latestJob: { spentUsd: number; capUsd: number } | null };
 }
 const amount = (value: unknown) => typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;

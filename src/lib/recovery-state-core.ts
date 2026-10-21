@@ -1,5 +1,6 @@
 /** Public recovery metadata never includes private inventories, credentials or ledgers. */
 export interface PublicRecoveryState {
+  freshScan?: import("./fresh-scan-policy").FreshScanAuthorization;
   pendingCloudRecovery: boolean;
   message: string;
   extractionBlocked: boolean;

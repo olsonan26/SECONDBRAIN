@@ -10,6 +10,7 @@ interface ExtractionProps {
   sources: Source[];
   isOwner: boolean;
   extractionBlocked?: boolean;
+  freshScan?: { jobId: string; sourceId: string; budgetUsd: number };
   onGraphChanged?: () => void | Promise<void>;
   onAskQuestion?: (question: string) => void;
   requirements?: string;
@@ -39,12 +40,12 @@ function Progress({ label, value, total }: { label: string; value: number; total
   return <div className="knowledge-progress"><div><span>{label}</span><strong>{number.format(value)} / {number.format(total)}</strong></div><progress aria-label={label} max={Math.max(1, total)} value={value} /><small>{percent}%</small></div>;
 }
 
-export default function KnowledgeExtraction({ brainId, sources, isOwner, extractionBlocked = false, onGraphChanged, onAskQuestion, requirements = "", profileName }: ExtractionProps) {
+export default function KnowledgeExtraction({ brainId, sources, isOwner, extractionBlocked = false, freshScan, onGraphChanged, onAskQuestion, requirements = "", profileName }: ExtractionProps) {
   const formId = useId();
   const [jobs, setJobs] = useState<KnowledgeJobSummary[]>([]);
-  const [sourceId, setSourceId] = useState(sources[0]?.id || "");
+  const [sourceId, setSourceId] = useState(freshScan?.sourceId || sources[0]?.id || "");
   const [instructions, setInstructions] = useState(requirements);
-  const [budget, setBudget] = useState("3");
+  const [budget, setBudget] = useState(String(freshScan?.budgetUsd ?? 3));
   const [resumeBudgets, setResumeBudgets] = useState<Record<string, string>>({});
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
@@ -196,7 +197,7 @@ export default function KnowledgeExtraction({ brainId, sources, isOwner, extract
         <p className="knowledge-note">{job.stage === "complete" ? "All passages completed processing and review. This audit does not guarantee that AI found every possible teaching." : job.stage === "needs-review" ? "Unresolved passages remain visible. Review or retry them before treating extraction as finished." : driving === job.id ? "This browser is processing the next batch. Keep this tab open; pause safely or resume saved work later." : "Progress is saved for both Alex and Peter. An active worker may continue processing; use Continue here to drive it from this browser."}</p>
       </article>;
     })}
-    {isOwner ? <details className="knowledge-create" open={!jobs.length && !loading}><summary><Sparkles size={14} />{jobs.length ? "Extract another source" : "Start AI knowledge extraction"}<ChevronDown size={13} /></summary><form onSubmit={event => { void start(event); }}>
+    {isOwner && (!freshScan || !jobs.some(job => job.id === freshScan.jobId)) ? <details className="knowledge-create" open={!jobs.length && !loading}><summary><Sparkles size={14} />{jobs.length ? "Extract another source" : "Start AI knowledge extraction"}<ChevronDown size={13} /></summary><form onSubmit={event => { void start(event); }}>
       <label className="field-label" htmlFor={`${formId}-source`}>Source to process</label><select id={`${formId}-source`} value={sourceId} onChange={event => setSourceId(event.target.value)} disabled={!!busy || !!driving || extractionBlocked} required>{!sources.length ? <option value="">Import a source first</option> : sources.map(source => <option key={source.id} value={source.id}>{source.title}</option>)}</select>
       <div className="knowledge-budget-setting"><label className="field-label" htmlFor={`${formId}-budget`}>Maximum model spend (USD)</label><span>$<input id={`${formId}-budget`} aria-describedby={`${formId}-budget-help`} type="number" min="0.1" max="10" step="0.1" value={budget} disabled={extractionBlocked} onChange={event => setBudget(event.target.value)} required /></span></div><p className="field-help" id={`${formId}-budget-help`}>{extractionBlocked ? "The previous job’s saved budget and spending are unavailable until recovery. This form cannot create a replacement job." : "A spending guard, not a price quote. Used for new jobs; raising a paused job’s cap requires a separate owner action. Unfinished work pauses at the cap. Completed work stays saved."}</p>
       <details className="knowledge-details"><summary>{profileName || "Questions and extraction priorities"}<ChevronDown size={12} /></summary><label className="field-label" htmlFor={`${formId}-requirements`}>Additional questions or topics to audit</label><textarea id={`${formId}-requirements`} value={instructions} maxLength={60000} rows={5} disabled={extractionBlocked} onChange={event => setInstructions(event.target.value)} placeholder="List chart-reading questions, placements, aspects, formulas, rulership, delegates, profections, or other knowledge you want audited…" /><p className="field-help">Every passage is still processed. Questions guide the coverage audit; they do not replace source evidence.</p></details>
