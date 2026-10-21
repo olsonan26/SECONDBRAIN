@@ -31,13 +31,17 @@ async function main() {
     };
     let job = structuredClone(fixture);
     let resumeBody: { budgetUsd?: number } | undefined;
-    let stepCalls = 0;
+    let stepCalls = 0, nextPassCalls = 0;
+    let questionAnswer: "include" | "exclude" | undefined;
     const seenScopes: string[] = [];
     const mockGraph: GraphNode[] = Array.from({ length: 2305 }, (_, index) => ({ id: `teaching-${index}`, label: index === 0 ? "Unique teaching outside initial overview" : `Astrology teaching ${index}`, type: "teaching", knowledgeKind: "interpretation", layer: "uploaded", community: "Chart interpretation", sourceIds: [realWorkspace.sources[0].id], description: "A distinct, source-backed chart-reading teaching.", degree: index, evidence: [{ passageId: "knowledge-ui-evidence", sourceId: realWorkspace.sources[0].id, page: 42, quote: "This exact quotation is a local browser fixture, not real book content." }] }));
     const fulfill = (route: Route, payload: unknown) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(payload) });
     await context.route("**/api/knowledge/jobs**", async route => {
       const url = new URL(route.request().url());
       seenScopes.push(url.searchParams.get("brain") || "missing");
+      if (url.pathname.endsWith("/activity")) return fulfill(route, { events: [{ at: new Date().toISOString(), pass: 1, phase: "accepted", message: "Exact source evidence verified; saved checkpoint retained.", passageIds: [] }], audits: [{ passageId: "fixture", page: 42, disposition: "unresolved", reason: "Borderline teaching example requires a usefulness preference." }], questions: [{ id: "question-fixture", question: "Would this borderline teaching example be useful?", reason: "The example mixes a reusable rule with unrelated biography.", quote: "This exact quotation is a local browser fixture, not real book content.", answer: questionAnswer }] });
+      if (url.pathname.endsWith("/answer")) { questionAnswer = route.request().postDataJSON().answer; return fulfill(route, job); }
+      if (url.pathname.endsWith("/next-pass")) { nextPassCalls++; job = { ...job, stage: "queued", scanPass: (job.scanPass ?? 1) + 1, completedPasses: [1, ...(nextPassCalls > 1 ? [2] : [])], processedPassages: 0, reviewedPassages: 0, pendingCount: 3 }; return fulfill(route, job); }
       if (url.pathname.endsWith("/resume")) {
         resumeBody = route.request().postDataJSON() || undefined;
         job = { ...job, stage: "queued", budgetUsd: resumeBody?.budgetUsd || job.budgetUsd };
@@ -82,6 +86,23 @@ async function main() {
     assert.equal(stepCalls, 1);
     assert.ok(seenScopes.every(scope => scope === "main"));
     console.log("PASS: Owner can see real counts, candidate/not-found coverage, explicitly raise a paused job cap, and run one safely mocked step.");
+    assert.equal(nextPassCalls, 0, "Completing a pass must not automatically start the next one");
+    await expect(panel.getByRole("heading", { name: "Full-book pass 1 of 3" })).toBeVisible();
+    await panel.getByRole("button", { name: "Start pass 2: find missed knowledge" }).click();
+    await expect(panel.getByRole("heading", { name: "Full-book pass 2 of 3" })).toBeVisible();
+    await expect(panel.getByRole("button", { name: "Start pass 3: final coverage check" })).toBeVisible();
+    assert.equal(nextPassCalls, 1);
+    assert.equal(job.budgetUsd, 10);
+    await panel.getByRole("button", { name: "Start pass 3: final coverage check" }).click();
+    await expect(panel.getByText("All three passes finished. Check unresolved passages below.")).toBeVisible();
+    assert.equal(nextPassCalls, 2);
+    assert.equal(stepCalls, 3);
+    await panel.getByText("Activity, evidence decisions & questions", { exact: true }).click();
+    await expect(panel.getByText("Exact source evidence verified; saved checkpoint retained.")).toBeVisible();
+    await panel.getByRole("button", { name: "Yes, useful—include if supported" }).click();
+    await expect(panel.getByText("Saved preference: include. Source verification is still required.")).toBeVisible();
+    assert.equal(stepCalls, 3, "Answering a question must not run another paid step");
+    console.log("PASS: All three whole-book passes require owner clicks, retain the cap, and show sourced decision logs and saved usefulness answers.");
 
     await page.getByRole("button", { name: "The brain", exact: true }).click();
     await expect(page.locator(".graph-scene-summary")).toContainText("1,800 of 2,305 nodes shown");
@@ -98,7 +119,7 @@ async function main() {
     await page.getByRole("button", { name: "Knowledge extraction", exact: true }).click();
     await expect(panel).toBeVisible();
     await page.screenshot({ path: "test-results/knowledge-progress-mobile.png", fullPage: true });
-    const overflow = await page.evaluate(() => ({ width: window.innerWidth, scroll: document.documentElement.scrollWidth, elements: [...document.querySelectorAll("body *")].filter(element => element.getBoundingClientRect().right > window.innerWidth + 1).slice(0, 12).map(element => ({ tag: element.tagName, class: element.className, right: element.getBoundingClientRect().right })) }));
+    const overflow = await page.evaluate(() => ({ width: window.innerWidth, scroll: document.documentElement.scrollWidth, elements: [...document.querySelectorAll("body *")].filter(element => element.getBoundingClientRect().right > window.innerWidth + 1).sort((a, b) => b.getBoundingClientRect().right - a.getBoundingClientRect().right).slice(0, 8).map(element => ({ tag: element.tagName, class: element.className, parent: element.parentElement?.className, position: getComputedStyle(element).position, right: element.getBoundingClientRect().right })) }));
     assert.ok(overflow.scroll <= overflow.width + 1, `Mobile page overflows horizontally: ${JSON.stringify(overflow)}`);
     await page.screenshot({ path: "test-results/knowledge-progress-mobile.png", fullPage: true });
 

@@ -20,13 +20,15 @@ const relationshipSchema = z.object({
   sourceKey: z.string().min(1).max(100), targetKey: z.string().min(1).max(100),
   relation: z.string().min(2).max(140), evidence: z.array(knowledgeEvidenceSchema).min(1).max(6),
 });
-export const extractionSchema = z.object({ teachings: z.array(teachingSchema).max(150), relationships: z.array(relationshipSchema).max(200).default([]), passages: z.array(dispositionSchema).max(30), gaps: z.array(z.string().max(900)).max(40).default([]) });
+const clarificationSchema = z.object({ passageId: z.string().min(1).max(180), quote: z.string().min(12).max(1800), question: z.string().min(12).max(500), reason: z.string().min(10).max(900) });
+export const extractionSchema = z.object({ teachings: z.array(teachingSchema).max(150), relationships: z.array(relationshipSchema).max(200).default([]), passages: z.array(dispositionSchema).max(30), gaps: z.array(z.string().max(900)).max(40).default([]), clarifications: z.array(clarificationSchema).max(3).default([]) });
 export const reviewSchema = z.object({
   checks: z.array(z.object({ key: z.string().min(1).max(100), supported: z.boolean(), reason: z.string().min(3).max(900) })).max(150),
   additions: z.array(teachingSchema).max(150).default([]),
   relationships: z.array(relationshipSchema).max(200).default([]),
   passages: z.array(dispositionSchema).max(30),
   reviewComplete: z.boolean(), gaps: z.array(z.string().max(900)).max(40).default([]),
+  clarifications: z.array(clarificationSchema).max(3).default([]),
 });
 export type Teaching = z.infer<typeof teachingSchema>;
 export type Extraction = z.infer<typeof extractionSchema>;

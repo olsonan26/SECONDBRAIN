@@ -63,7 +63,7 @@ test("resumable three-worker extraction isolates storage, accounts real usage an
     const {writeRecord,readRecord}=await load('./src/lib/storage.ts');
     const {brainKey}=await load('./src/lib/brain-scope.ts');
     const {saveSettings}=await load('./src/lib/model.ts');
-    const {createKnowledgeJob,listKnowledgeJobs,getKnowledgeJob,stepKnowledgeJob,pauseKnowledgeJob,resumeKnowledgeJob}=await load('./src/lib/knowledge.ts');
+    const {createKnowledgeJob,listKnowledgeJobs,getKnowledgeJob,stepKnowledgeJob,pauseKnowledgeJob,resumeKnowledgeJob,startNextKnowledgePass,knowledgeActivity,answerKnowledgeQuestion}=await load('./src/lib/knowledge.ts');
     const {getCorpus}=await load('./src/lib/corpus.ts');
     const originalCwd=process.cwd();
     const temp=await mkdtemp(path.join(os.tmpdir(),'secondbrain-knowledge-'));
@@ -94,7 +94,7 @@ test("resumable three-worker extraction isolates storage, accounts real usage an
       const passages=Array.from({length:13},(_,i)=>({id:'p'+i,sourceId:'book',sourceTitle:'Timing book',page:i+1,section:'Timing',lineStart:1,lineEnd:2,text:'Rule '+i+': The activation begins at the vernal equinox, not on a birthday. Preserve this exact timing distinction.'}));
       await writeRecord(brainKey(brain.id,'corpus.json'),{...main,sources:[source],passages,nodes:[{id:'source:book',label:'Book',type:'document',layer:'uploaded',community:'Your uploads',sourceIds:['book'],description:'Source',degree:0}],warnings:[]});
       await saveSettings({provider:'openrouter',model:'deepseek/test',apiKey:'sk-or-test-only-not-real',writingInstructions:'Do not overwrite this writing instruction.'});
-      let calls=0;
+      let calls=0, emitQuestions=false;
       globalThis.fetch=async(url,options)=>{
         assert.match(String(url),/openrouter.ai/);
         calls++;
@@ -107,6 +107,7 @@ test("resumable three-worker extraction isolates storage, accounts real usage an
         const teachings=target.map((p,i)=>({key:'t'+i,label:'Timing rule '+p.id,kind:'rule',topic:'Profection Activation',text:p.text,aliases:['activation'],applicationTags:['timing'],evidence:[{passageId:p.id,quote:p.text}]}));
         const dispositions=target.map(p=>({passageId:p.id,disposition:'extracted',reason:'The complete source timing distinction is retained.'}));
         const output=data.proposedTeachings?{teachings:data.proposedTeachings.map(t=>({key:t.key,supported:true,reason:'Every assertion, alias and application tag is explicitly supported.'})),relationships:[],passages:target.map(p=>({passageId:p.id,complete:true,reason:'Every teaching is retained and all conditions are preserved.'})),gaps:[]}:data.candidate?{checks:data.candidate.teachings.map(t=>({key:t.key,supported:true,reason:'Every condition is explicitly supported by the exact source passage.'})),additions:[],relationships:[],passages:dispositions,reviewComplete:true,gaps:[]}:{teachings,relationships:[],passages:dispositions,gaps:[]};
+        if(emitQuestions && !data.proposedTeachings)output.clarifications=[{passageId:target[0].id,quote:target[0].text,question:'Would this borderline teaching example be useful?',reason:'The example mixes a reusable rule with storytelling and the intended usefulness is genuinely unclear.'},{passageId:'unknown-passage',quote:target[0].text,question:'Would this unsupported question be useful?',reason:'Fixture with a nonexistent evidence passage must not become a user clarification.'}];
         await new Promise(resolve=>setTimeout(resolve,15));
         return Response.json({choices:[{finish_reason:'stop',message:{content:JSON.stringify(output)}}],usage:{prompt_tokens:1500,completion_tokens:1000,cost:.001}});
       };
@@ -226,7 +227,72 @@ test("resumable three-worker extraction isolates storage, accounts real usage an
       assert.equal(splitDone.stage,'complete');
       assert.equal(splitDone.nodesAdded,2);
       assert.equal(splitDone.costUsd,.007,'The original truncated call remains included in spending.');
-      console.log('PASS: three-worker durable extraction, exact evidence, source isolation, adaptive splitting and hard budget.');
+      const scanBrain=await createBrain('Three full passes fixture','Test only','Alex');
+      await writeRecord(brainKey(scanBrain.id,'corpus.json'),{...main,sources:[source],passages:passages.slice(0,2),warnings:[]});
+      const scan=await createKnowledgeJob({sourceIds:['book'],budgetUsd:1},scanBrain.id,'Alex');
+      emitQuestions=true;
+      const beforeScanCalls=calls;
+      await assert.rejects(()=>startNextKnowledgePass(scan.id,scanBrain.id),/Finish or resume/);
+      assert.equal(calls,beforeScanCalls,'Starting or inspecting pass controls makes no paid calls.');
+      for(let pass=1;pass<=3;pass++) {
+        for(let phase=0;phase<3;phase++)await stepKnowledgeJob(scan.id,scanBrain.id);
+        const checkpoint=await getKnowledgeJob(scan.id,scanBrain.id);
+        assert.equal(checkpoint.stage,'complete');
+        assert.equal(checkpoint.scanPass,pass);
+        assert.equal(checkpoint.reviewedPassages,2,'Every full-book pass must reread every target passage.');
+        assert.equal(checkpoint.costUsd,Math.round(.003*pass*1e8)/1e8,'One cumulative spending ledger covers every pass.');
+        assert.equal(checkpoint.nodesAdded,2,'Exact duplicate knowledge must not inflate the graph across passes.');
+        const atBoundary=calls;
+        await stepKnowledgeJob(scan.id,scanBrain.id);
+        assert.equal(calls,atBoundary,'Completion must not automatically start the next full-book pass.');
+        if(pass<3) {
+          const next=await startNextKnowledgePass(scan.id,scanBrain.id);
+          assert.equal(next.costUsd,checkpoint.costUsd);
+          assert.equal(next.budgetUsd,1);
+          assert.equal(next.processedPassages,0);
+          assert.equal(next.pendingCount,2);
+          assert.equal(calls,atBoundary,'The explicit next-pass button queues work without a hidden model call.');
+          await pauseKnowledgeJob(scan.id,scanBrain.id);
+          await stepKnowledgeJob(scan.id,scanBrain.id);
+          assert.equal(calls,atBoundary,'Pause checkpoint blocks new provider calls.');
+          await resumeKnowledgeJob(scan.id,scanBrain.id);
+        }
+      }
+      await assert.rejects(()=>startNextKnowledgePass(scan.id,scanBrain.id),/All three/);
+      await assert.rejects(()=>knowledgeActivity(scan.id,'main'),/not in the selected brain/);
+      const activity=await knowledgeActivity(scan.id,scanBrain.id);
+      assert.ok(activity.events.some(event=>event.phase==='checkpoint'));
+      assert.ok(activity.events.some(event=>event.phase==='accepted'));
+      assert.equal(activity.passHistory.length,2);
+      assert.equal(activity.questions.length,1,'Only exact source-linked clarifications are retained; duplicate questions and unknown passages are rejected.');
+      const beforeAnswer=calls;
+      await answerKnowledgeQuestion(scan.id,scanBrain.id,{questionId:activity.questions[0].id,answer:'include',note:'Keep the reusable teaching, not the biography.'});
+      assert.equal(calls,beforeAnswer,'Saving a clarification must not secretly start another paid scan.');
+      assert.equal((await knowledgeActivity(scan.id,scanBrain.id)).questions[0].answer,'include');
+      await assert.rejects(()=>answerKnowledgeQuestion(scan.id,scanBrain.id,{questionId:'nonexistent',answer:'include'}),/not in this brain/);
+      emitQuestions=false;
+      const inFlightBrain=await createBrain('Pause during a call fixture','Test only','Alex');
+      await writeRecord(brainKey(inFlightBrain.id,'corpus.json'),{...main,sources:[source],passages:[passages[0]],warnings:[]});
+      const inFlightJob=await createKnowledgeJob({sourceIds:['book'],budgetUsd:1},inFlightBrain.id,'Alex');
+      let releaseCall;
+      const gate=new Promise(resolve=>{releaseCall=resolve;});
+      let enteredCall=false;
+      globalThis.fetch=async(...args)=>{enteredCall=true;await gate;return validFetch(...args);};
+      const pendingStep=stepKnowledgeJob(inFlightJob.id,inFlightBrain.id);
+      for(let i=0;i<100 && !enteredCall;i++)await new Promise(resolve=>setTimeout(resolve,5));
+      assert.equal(enteredCall,true);
+      await pauseKnowledgeJob(inFlightJob.id,inFlightBrain.id);
+      releaseCall();
+      const savedInFlight=await pendingStep;
+      assert.equal(savedInFlight.stage,'paused','An already-running call may save, but must not unpause the job.');
+      assert.equal(savedInFlight.costUsd,.001,'The in-flight call remains accounted.');
+      const checkpointDetail=await getKnowledgeJob(inFlightJob.id,inFlightBrain.id);
+      assert.equal(checkpointDetail.batches[0].phase,'review','The saved candidate resumes from review, not a repeated extraction.');
+      const pausedCalls=calls;
+      await stepKnowledgeJob(inFlightJob.id,inFlightBrain.id);
+      assert.equal(calls,pausedCalls);
+      globalThis.fetch=validFetch;
+      console.log('PASS: durable three full-book passes, manual boundaries, in-flight checkpoints, same spending cap and evidence decisions.');
     } finally {
       process.chdir(originalCwd);
       assert.ok(path.resolve(temp).startsWith(path.resolve(os.tmpdir())+path.sep+'secondbrain-knowledge-'));

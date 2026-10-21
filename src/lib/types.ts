@@ -77,6 +77,9 @@ export interface KnowledgePassageAudit {
 }
 export type KnowledgeStage = "queued" | "running" | "paused" | "paused-budget" | "complete" | "needs-review" | "failed";
 export interface KnowledgeJobSummary {
+  scanPass?: number;
+  completedPasses?: number[];
+  openQuestions?: number;
   id: string;
   sourceIds: string[];
   author: string;

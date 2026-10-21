@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { AlertCircle, BookOpen, Check, ChevronDown, LoaderCircle, Network, Pause, Play, RefreshCw, Sparkles } from "lucide-react";
 import type { GraphNode, Source, KnowledgeJobSummary, KnowledgeStage } from "@/lib/types";
+import KnowledgeJobControls from "./knowledge-job-controls";
 
 interface ExtractionProps {
   brainId: string;
@@ -136,6 +137,15 @@ export default function KnowledgeExtraction({ brainId, sources, isOwner, onGraph
     finally { setBusy(null); }
   }
 
+  async function nextPass(job: KnowledgeJobSummary) {
+    setBusy(job.id); setError("");
+    try {
+      const updated = await request<KnowledgeJobSummary>(brainId, `/${encodeURIComponent(job.id)}/next-pass`, "POST", {});
+      await load(); void drive(updated);
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not start the next pass."); }
+    finally { setBusy(null); }
+  }
+
   return <section className="knowledge-extraction" aria-labelledby={`${formId}-heading`}>
     <div className="knowledge-heading"><span className="knowledge-symbol"><Network size={20} /></span><div><h2 id={`${formId}-heading`}>Turn the book into connected knowledge.</h2><p>Individual teachings, definitions, techniques, and formulas—with their exact supporting text.</p></div><button className="icon-button" aria-label="Refresh extraction progress" onClick={() => { void load().catch(cause => setError(cause instanceof Error ? cause.message : "Could not refresh progress.")); }}><RefreshCw size={15} /></button></div>
     {error ? <p className="knowledge-error" role="alert"><AlertCircle size={15} />{error}</p> : null}
@@ -147,6 +157,7 @@ export default function KnowledgeExtraction({ brainId, sources, isOwner, onGraph
       const canResume = !isActive(job) && job.stage !== "complete";
       return <article className={`knowledge-job ${needsAttention ? "needs-attention" : ""}`} key={job.id}>
         <div className="knowledge-job-heading"><div><strong>{job.sourceIds.map(id => sources.find(source => source.id === id)?.title || "Source document").join(", ")}</strong><span className={`knowledge-stage ${job.stage}`}>{driving === job.id ? <LoaderCircle size={12} className="spin" /> : job.stage === "complete" ? <Check size={12} /> : null}{stageLabel[job.stage]}</span></div>{isOwner ? <div className="knowledge-job-actions">{isActive(job) ? <><button className="button button-secondary" disabled={busy === job.id} onClick={() => { void control(job, "pause"); }}><Pause size={13} />Pause</button>{!driving ? <button className="button button-secondary" disabled={!!busy} onClick={() => { void drive(job); }}><Play size={13} />Continue here</button> : null}</> : canResume ? <button className="button button-secondary" disabled={!!busy || !!driving} onClick={() => { void control(job, "resume"); }}><Play size={13} />{job.stage === "failed" || job.stage === "needs-review" ? "Retry unresolved" : "Resume"}</button> : null}</div> : null}</div>
+        <KnowledgeJobControls job={job} brainId={brainId} isOwner={isOwner} disabled={!!busy} onPause={() => { void control(job, "pause"); }} onNextPass={() => { void nextPass(job); }} />
         <div className="knowledge-progress-grid"><Progress label="Passages processed" value={job.processedPassages} total={job.totalPassages} /><Progress label="Passages reviewed" value={job.reviewedPassages} total={job.totalPassages} /></div>
         <dl className="knowledge-counts"><div><dt>Knowledge nodes</dt><dd>{number.format(job.nodesAdded)}</dd></div><div><dt>Connections</dt><dd>{number.format(job.edgesAdded)}</dd></div><div><dt>Non-teaching passages</dt><dd>{number.format(job.excludedPassages)}</dd></div><div className={job.unresolvedPassages ? "attention" : ""}><dt>Unresolved passages</dt><dd>{number.format(job.unresolvedPassages)}</dd></div></dl>
         <div className="knowledge-budget"><span>{money(job.costUsd)} tracked usage <span>/ {money(job.budgetUsd)} cap</span><small>{money(job.measuredCostUsd)} provider-reported · {money(job.estimatedCostUsd)} estimated usage</small>{job.estimatedTotalCostUsd !== undefined ? <small>Initial full-job estimate: {money(job.estimatedTotalCostUsd)} (projection, not spend)</small> : null}{job.reservedUsd > 0 ? <small>{money(job.reservedUsd)} reserved for a call in progress</small> : null}</span><span>{job.currentPhase === "review" ? "Coverage review" : "Knowledge extraction"}<small>{job.model}</small></span></div>

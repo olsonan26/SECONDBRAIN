@@ -9,7 +9,7 @@ import { getSettings } from "./model";
 import { modelConnection, modelError } from "./model-provider";
 import { listRecords, readRecord, updateRecord } from "./storage";
 import { applicationInstructions, extractionSchema, extractionShape, finalVerificationInstructions, finalVerificationSchema, independentlyVerifiedFragment, knowledgeInstructions, reviewSchema, reviewShape, type Extraction, type KnowledgeReview, type PassageAudit } from "./knowledge-schema";
-import { granularityInstructions } from "./knowledge-schema";
+import { granularityInstructions, validatedEvidence } from "./knowledge-schema";
 
 const LEASE_MS = 110_000;
 const MAX_COMPLETION_TOKENS = 12_000;
@@ -25,6 +25,10 @@ type Batch = {
   candidate?: Extraction; review?: KnowledgeReview; error?: string;
 };
 interface KnowledgeJob {
+  scanPass?: number;
+  passHistory?: { pass: number; finishedAt: string; nodesAdded: number; costUsd: number; audits: PassageAudit[] }[];
+  activity?: { at: string; pass: number; phase: string; message: string; passageIds: string[] }[];
+  questions?: { id: string; pass: number; passageId: string; quote: string; question: string; reason: string; answer?: "include" | "exclude"; note?: string; answeredAt?: string }[];
   version: 1; id: string; brainId: string; sourceIds: string[]; author: string;
   createdAt: string; updatedAt: string; stage: KnowledgeStage; provider: Settings["provider"]; model: string;
   requirements: string; budgetUsd: number; costUsd: number; measuredCostUsd: number; estimatedCostUsd: number; estimatedTotalCostUsd: number;
@@ -44,7 +48,7 @@ function jobKey(brainId: string, id: string) {
 }
 function summary(job: KnowledgeJob): KnowledgeJobSummary {
   const processed = job.passages.filter(p => p.disposition !== "pending");
-  return { id: job.id, sourceIds: job.sourceIds, author: job.author, createdAt: job.createdAt, updatedAt: job.updatedAt,
+  return { scanPass: job.scanPass ?? 1, completedPasses: [...(job.passHistory ?? []).map(pass => pass.pass), ...(["complete", "needs-review"].includes(job.stage) ? [job.scanPass ?? 1] : [])], openQuestions: (job.questions ?? []).filter(question => !question.answer).length, id: job.id, sourceIds: job.sourceIds, author: job.author, createdAt: job.createdAt, updatedAt: job.updatedAt,
     stage: job.stage, provider: job.provider, model: job.model, totalPassages: job.passages.length,
     processedPassages: processed.length, pendingCount: job.passages.length - processed.length,
     reviewedPassages: job.batches.filter(b => b.state === "done").reduce((n, b) => n + b.passageIds.length, 0),
@@ -79,6 +83,45 @@ async function recoverCreatingJobs(brainId: string) {
   await updateRecord(key, registry, current => { for (const id of recovered) delete current.creating[id]; return current; });
 }
 function addWarning(job: KnowledgeJob, message: string) { job.warnings = [...new Set([...job.warnings, message])].slice(-70); }
+function logActivity(job: KnowledgeJob, phase: string, message: string, passageIds: string[] = []) {
+  job.activity = [...(job.activity ?? []), { at: stamp(), pass: job.scanPass ?? 1, phase, message, passageIds }].slice(-300);
+}
+
+export async function knowledgeActivity(id: string, brainId: string) {
+  const job = await readJob(id, brainId);
+  return { events: (job.activity ?? []).slice(-100).reverse(), questions: [...(job.questions ?? [])].sort((a, b) => Number(Boolean(a.answer)) - Number(Boolean(b.answer))).slice(0, 100), audits: job.passages.filter(passage => passage.disposition !== "pending").slice(-100), passHistory: (job.passHistory ?? []).map(({ audits, ...pass }) => ({ ...pass, reviewed: audits.length, unresolved: audits.filter(audit => audit.disposition === "unresolved").length })) };
+}
+
+export async function answerKnowledgeQuestion(id: string, brainId: string, input: { questionId: string; answer: "include" | "exclude"; note?: string }) {
+  const initial = await readJob(id, brainId);
+  return summary(await updateRecord(jobKey(brainId, id), initial, job => {
+    const question = job.questions?.find(question => question.id === input.questionId);
+    if (!question) throw new HttpError(404, "This clarification is not in this brain's extraction job.");
+    question.answer = input.answer; question.note = input.note?.slice(0, 2000); question.answeredAt = stamp();
+    logActivity(job, "clarification", "Owner saved a usefulness preference. Source evidence remains mandatory; no model call was started.", [question.passageId]);
+    job.updatedAt = stamp(); return job;
+  }));
+}
+
+export async function startNextKnowledgePass(id: string, brainId: string) {
+  const initial = await readJob(id, brainId), corpus = await getCorpus(brainId);
+  return summary(await updateRecord(jobKey(brainId, id), initial, job => {
+    releaseExpired(job);
+    if (!["complete", "needs-review"].includes(job.stage) || job.batches.some(batch => batch.state === "pending" || batch.state === "leased")) throw new HttpError(409, "Finish or resume the current pass before starting another whole-book pass.");
+    const pass = job.scanPass ?? 1;
+    if (pass >= 3) throw new HttpError(409, "All three full-book passes have already been run. Review unresolved evidence rather than silently starting a fourth paid scan.");
+    const passages = corpus.passages.filter(passage => job.sourceIds.includes(passage.sourceId));
+    if (passages.length !== job.passages.length || passages.some(passage => hash(passage.text) !== job.passageHashes[passage.id])) throw new HttpError(409, "The source changed. This scan cannot silently replace the saved book.");
+    job.passHistory = [...(job.passHistory ?? []), { pass, finishedAt: stamp(), nodesAdded: job.nodesAdded, costUsd: job.costUsd, audits: structuredClone(job.passages) }];
+    job.scanPass = pass + 1;
+    job.batches = [];
+    for (let offset = 0; offset < passages.length; offset += BATCH_SIZE) job.batches.push({ id: `pass${pass + 1}-${offset / BATCH_SIZE}`, passageIds: passages.slice(offset, offset + BATCH_SIZE).map(passage => passage.id), phase: "extract", state: "pending", attempts: 0, revision: 0 });
+    job.passages = passages.map(passage => ({ passageId: passage.id, sourceId: passage.sourceId, page: passage.page, disposition: "pending", reason: "Awaiting the next full-book coverage pass.", nodeIds: [] }));
+    job.stage = "queued"; job.error = undefined; job.updatedAt = stamp();
+    logActivity(job, "scan", `Owner started full-book pass ${pass + 1} of 3. All passages will be reread against existing graph knowledge. The same accumulated spending cap is retained.`);
+    return job;
+  }));
+}
 function updateStage(job: KnowledgeJob) {
   if (["paused", "paused-budget", "failed"].includes(job.stage)) return;
   if (job.batches.some(b => b.state === "leased" || b.state === "pending")) job.stage = "running";
@@ -153,13 +196,21 @@ export async function createKnowledgeJob(input: { sourceIds: string[]; requireme
 
 export async function pauseKnowledgeJob(id: string, brainId: string) {
   const initial = await readJob(id, brainId);
-  return summary(await updateRecord(jobKey(brainId, id), initial, job => { if (!["complete", "needs-review"].includes(job.stage)) job.stage = "paused"; job.updatedAt = stamp(); return job; }));
+  return summary(await updateRecord(jobKey(brainId, id), initial, job => { if (!["complete", "needs-review"].includes(job.stage)) job.stage = "paused"; logActivity(job, "checkpoint", "Pause and save requested. No new model calls will start. An already-running call may finish and save its result and cost."); job.updatedAt = stamp(); return job; }));
 }
 export async function resumeKnowledgeJob(id: string, brainId: string, input: { budgetUsd?: number } = {}) {
   if (input.budgetUsd !== undefined) validateBudget(input.budgetUsd);
   const initial = await readJob(id, brainId);
   return summary(await updateRecord(jobKey(brainId, id), initial, job => {
     releaseExpired(job);
+    // Older saved jobs may still have larger batches. Shrink only untouched
+    // extraction work; never discard a completed review or an active lease.
+    job.batches = job.batches.flatMap(batch => {
+      if (batch.phase !== "extract" || batch.state !== "pending" || batch.passageIds.length <= BATCH_SIZE) return [batch];
+      const pieces: Batch[] = [];
+      for (let start = 0; start < batch.passageIds.length; start += BATCH_SIZE) pieces.push({ id: `${batch.id}.chunk${start / BATCH_SIZE}`, passageIds: batch.passageIds.slice(start, start + BATCH_SIZE), phase: "extract", state: "pending", attempts: 0, revision: batch.revision + 1 });
+      return pieces;
+    });
     if (input.budgetUsd !== undefined) {
       if (input.budgetUsd < job.costUsd + job.batches.reduce((n, b) => n + (b.lease?.reservation ?? 0), 0)) throw new HttpError(400, "The cap cannot be lower than already spent and reserved usage.");
       job.budgetUsd = input.budgetUsd;
@@ -172,12 +223,15 @@ export async function resumeKnowledgeJob(id: string, brainId: string, input: { b
       batch.state = "pending"; batch.phase = "extract"; batch.attempts = 0; batch.revision += 1; batch.candidate = undefined; batch.review = undefined;
       for (const audit of job.passages) if (batch.passageIds.includes(audit.passageId) && audit.disposition === "unresolved") { audit.disposition = "pending"; audit.reason = "Requeued for explicit follow-up review."; }
     }
-    job.stage = "running"; job.error = undefined; job.updatedAt = stamp(); updateStage(job); return job;
+    job.stage = "running"; job.error = undefined; job.updatedAt = stamp(); logActivity(job, "checkpoint", "Owner resumed the saved pass with all previous knowledge, reviewed passages and spending retained."); updateStage(job); return job;
   }));
 }
 
 function promptFor(job: KnowledgeJob, batch: Batch, passages: Passage[], corpus: Corpus) {
   const contextIds = new Set(batch.passageIds);
+  const existing = corpus.nodes.filter(node => node.evidence?.some(evidence => contextIds.has(evidence.passageId))).slice(0, 60);
+  const existingIds = new Set(existing.map(node => node.id));
+  const nodeLabels = new Map(corpus.nodes.map(node => [node.id, node.label]));
   const boundary: Passage[] = [];
   for (const passage of passages) {
     const index = corpus.passages.findIndex(p => p.id === passage.id);
@@ -188,11 +242,13 @@ function promptFor(job: KnowledgeJob, batch: Batch, passages: Passage[], corpus:
   const lines = job.requirements.split(/\r?\n/).map(text => ({ text, score: (text.toLowerCase().match(/[\p{L}\p{N}']{4,}/gu) ?? []).reduce((n, term) => n + Number(vocabulary.has(term)), 0) })).filter(v => v.score > 0).sort((a, b) => b.score - a.score);
   const requirements = lines.slice(0, 24).map(v => v.text).join("\n").slice(0, 6000);
   return [
-    { role: "system", content: `${knowledgeInstructions}\n${applicationInstructions}\n${granularityInstructions}\n${batch.phase === "extract" ? extractionShape : batch.phase === "review" ? reviewShape : finalVerificationInstructions}` },
+    { role: "system", content: `${knowledgeInstructions}\n${applicationInstructions}\n${granularityInstructions}\nFull-book pass ${job.scanPass ?? 1} of 3. ${job.scanPass && job.scanPass > 1 ? "Reread EVERY supplied target passage looking for omissions, distinctions and exceptions missed in the existing graph. Existing graph summaries are navigation data, never evidence. Return additional source-backed atomic knowledge, not paraphrased duplicates." : "Perform initial discovery of every distinct teaching."}\nOnly when genuinely unable to decide whether a specific passage teaches reusable knowledge rather than unrelated storytelling, optionally return clarifications:[{passageId,quote,question,reason}]. Ask a concise usefulness question with the exact quote and concrete ambiguity. Default clarifications to []: do not ask about routine teachings, request permission repeatedly, or ask the user to invent facts. Owner preferences never override source evidence.\n${batch.phase === "extract" ? extractionShape : batch.phase === "review" ? reviewShape : finalVerificationInstructions}` },
     { role: "user", content: JSON.stringify({ sourcePolicy: "Extract all teachings whether or not a wish-list question mentions them. Boundary context may clarify meaning but cite ONLY the supplied target passages, which are the ones audited in this batch.", coverageWishListNotEvidence: requirements,
       targetPassages: passages.map(p => ({ id: p.id, sourceId: p.sourceId, page: p.page, section: p.section, text: p.text })),
       boundaryContextNotTarget: boundary.map(p => ({ page: p.page, text: p.text.slice(0, 2200) })),
       ...(batch.error ? { previousValidationFailureNotEvidence: batch.error } : {}),
+      existingGraphNavigationNotEvidence: { nodes: existing.map(node => ({ label: node.label, teaching: node.description.slice(0, 700) })), relationships: corpus.edges.filter(edge => existingIds.has(edge.source) || existingIds.has(edge.target)).slice(0, 80).map(edge => ({ source: nodeLabels.get(edge.source), relation: edge.relation, target: nodeLabels.get(edge.target) })) },
+      ownerUsefulnessPreferencesNotEvidence: (job.questions ?? []).filter(question => question.answer && contextIds.has(question.passageId)).map(question => ({ passageId: question.passageId, preference: question.answer, note: question.note })),
       ...(batch.phase === "review" ? { candidate: batch.candidate } : batch.phase === "verify" ? { proposedTeachings: [...(batch.candidate?.teachings ?? []), ...(batch.review?.additions ?? [])], proposedRelationships: batch.review?.relationships ?? [], proposedPassages: batch.review?.passages ?? [] } : {}) }) },
   ];
 }
@@ -273,7 +329,7 @@ export async function stepKnowledgeJob(id: string, brainId: string) {
     const outstanding = job.batches.reduce((n, b) => n + (b.lease?.reservation ?? 0), 0);
     if (job.costUsd + outstanding + reservation > job.budgetUsd) { job.stage = "paused-budget"; job.error = "The remaining safety budget cannot reserve another bounded model call. Progress is saved. Raise the cap explicitly to continue."; job.updatedAt = stamp(); return job; }
     batch.lease = { token, expiresAt: Date.now() + LEASE_MS, reservation }; batch.state = "leased"; batch.attempts += 1; claimedId = batch.id;
-    job.stage = "running"; job.updatedAt = stamp(); job.error = undefined; return job;
+    job.stage = "running"; job.updatedAt = stamp(); job.error = undefined; logActivity(job, batch.phase, `Checking ${batch.passageIds.length} source passage(s): ${batch.phase === "extract" ? "discovering distinct teachings" : batch.phase === "review" ? "reviewing for omissions and unsupported claims" : "independently checking exact evidence"}.`, batch.passageIds); return job;
   });
   if (!claimedId) return summary(claimed);
   const batch = claimed.batches.find(b => b.id === claimedId)!;
@@ -323,6 +379,13 @@ export async function stepKnowledgeJob(id: string, brainId: string) {
       for (const audit of receipt.audits ?? []) { const offset = job.passages.findIndex(p => p.passageId === audit.passageId); if (offset >= 0) job.passages[offset] = audit; }
       job.nodesAdded += receipt.nodes; job.edgesAdded += receipt.edges;
       for (const warning of receipt.warnings ?? []) addWarning(job, warning);
+      for (const question of [...(batch.candidate?.clarifications ?? []), ...(batch.review?.clarifications ?? [])]) {
+        const evidence = validatedEvidence([{ passageId: question.passageId, quote: question.quote }], passages);
+        if (!evidence) continue;
+        const questionId = hash(`${question.passageId}|${question.question}`).slice(0, 24);
+        if (!(job.questions ?? []).some(saved => saved.id === questionId)) job.questions = [...(job.questions ?? []), { ...question, quote: evidence[0].quote, id: questionId, pass: job.scanPass ?? 1 }];
+      }
+      logActivity(job, "accepted", `${receipt.nodes} new knowledge nodes and ${receipt.edges} connections saved after independent verification. ${receipt.audits?.filter(audit => audit.disposition === "unresolved").length ?? 0} passage(s) still need review.`, batch.passageIds);
     } else {
       if (truncated && currentBatch.passageIds.length > 1) {
         const offset = job.batches.indexOf(currentBatch);
@@ -334,6 +397,7 @@ export async function stepKnowledgeJob(id: string, brainId: string) {
       if (currentBatch.state === "failed") for (const audit of job.passages) if (currentBatch.passageIds.includes(audit.passageId)) { audit.disposition = "unresolved"; audit.reason = `Repeated ${currentBatch.phase} failure: ${failure}`; }
       if (fatalStatus) job.stage = fatalStatus === 429 ? "paused" : "failed";
     }
+    if (!resultAccepted) logActivity(job, "attention", job.error || failure, batch.passageIds);
     if (job.costUsd > job.budgetUsd) { job.stage = "paused-budget"; job.error = "Reported provider usage exceeded its conservative reservation. Extraction stopped; no further calls will be made."; }
     else updateStage(job);
     job.updatedAt = stamp(); return job;

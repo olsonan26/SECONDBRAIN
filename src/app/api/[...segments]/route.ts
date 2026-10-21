@@ -9,6 +9,7 @@ import type { Draft } from "@/lib/types";
 import { listBrains, createBrain, requireBrain } from "@/lib/brains";
 import { brainKey, MAIN_BRAIN_ID } from "@/lib/brain-scope";
 import { createKnowledgeJob, listKnowledgeJobs, getKnowledgeJob, stepKnowledgeJob, pauseKnowledgeJob, resumeKnowledgeJob } from "@/lib/knowledge";
+import { startNextKnowledgePass, knowledgeActivity, answerKnowledgeQuestion } from "@/lib/knowledge";
 import { getQuestionCoverage, saveQuestionProfile } from "@/lib/knowledge-question-profile";
 import { knowledgeNodeDetail, searchKnowledgeNodes } from "@/lib/knowledge-graph";
 
@@ -68,12 +69,18 @@ async function handle(request: Request, context: Context) {
       await saveQuestionProfile(input.requirements, job.id, brainId);
       return json(job, 201);
     }
-    const knowledgeAction = route.match(/^knowledge\/jobs\/([0-9a-f-]{36})(?:\/(step|pause|resume))?$/i);
+    const knowledgeAction = route.match(/^knowledge\/jobs\/([0-9a-f-]{36})(?:\/(step|pause|resume|next-pass|activity|answer))?$/i);
     if (knowledgeAction) {
       const id = z.string().uuid().parse(knowledgeAction[1]);
       if (!knowledgeAction[2] && request.method === "GET") return json(await getKnowledgeJob(id, brainId));
+      if (knowledgeAction[2] === "activity" && request.method === "GET") return json(await knowledgeActivity(id, brainId));
       if (request.method === "POST") {
         await requireUser(true);
+        if (knowledgeAction[2] === "next-pass") return json(await startNextKnowledgePass(id, brainId));
+        if (knowledgeAction[2] === "answer") {
+          const input = z.object({ questionId: z.string().min(1).max(100), answer: z.enum(["include", "exclude"]), note: z.string().max(2000).optional() }).parse(await body(request));
+          return json(await answerKnowledgeQuestion(id, brainId, input));
+        }
         if (knowledgeAction[2] === "step") return json(await stepKnowledgeJob(id, brainId));
         if (knowledgeAction[2] === "pause") return json(await pauseKnowledgeJob(id, brainId));
         if (knowledgeAction[2] === "resume") {
