@@ -1,5 +1,6 @@
 import "server-only";
 import { ConflictError } from "./storage-errors";
+import { encodeSupabaseRecord, decodeSupabaseRecord } from "./supabase-record-codec";
 
 // This is a narrow server-to-server credential, NOT a Supabase service-role key.
 // The Edge Function keeps the database credential inside Supabase.
@@ -27,15 +28,15 @@ async function json<T>(body: unknown): Promise<T> {
   return (await call("", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })).json() as Promise<T>;
 }
 
-export const supabaseRead = <T>(key: string) => json<{ record: { value: T; etag: string } | null }>({ op: "read", key }).then(r => r.record);
-export const supabaseWrite = (key: string, value: unknown, expectedEtag?: string | null) => json({ op: "write", key, value, checkVersion: expectedEtag !== undefined, expectedEtag: expectedEtag ?? null });
+export const supabaseRead = <T>(key: string) => json<{ record: { value: unknown; etag: string } | null }>({ op: "read", key }).then(r => r.record ? { ...r.record, value: decodeSupabaseRecord<T>(r.record.value) } : null);
+export const supabaseWrite = (key: string, value: unknown, expectedEtag?: string | null) => json({ op: "write", key, value: encodeSupabaseRecord(value), checkVersion: expectedEtag !== undefined, expectedEtag: expectedEtag ?? null });
 
 export async function supabaseList<T>(prefix: string): Promise<T[]> {
   const result: T[] = [];
   let after = "";
   for (;;) {
     const page = await json<{ records: { key: string; value: T; etag: string }[] }>({ op: "list", prefix, after });
-    result.push(...page.records.map(r => r.value));
+    result.push(...page.records.map(r => decodeSupabaseRecord<T>(r.value)));
     if (page.records.length < 100) return result;
     const next = page.records.at(-1)!.key;
     if (next <= after) throw new Error("Invalid storage pagination. No changes were saved.");

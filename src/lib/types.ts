@@ -174,6 +174,7 @@ export interface Settings {
   writingInstructions: string;
 }
 export interface Workspace {
+  recovery?: import("./recovery-state-core").PublicRecoveryState | null;
   graphOverviewOnly?: boolean;
   brain: Brain;
   brains: Brain[];

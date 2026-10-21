@@ -16,12 +16,25 @@ credential or gateway credential is exposed to the browser.
 - Live tests verified missing records, create-only writes, stale-version
   rejection, six concurrent saves (one winner), private binary download hashes,
   duplicate-original rejection, and unauthorized request rejection.
-- **Production is NOT switched to Supabase.** Vercel Blob is quota-suspended.
-  Listing its 24 existing objects works; reading their contents returns 403.
-  The migration stopped on `secondbrain/settings.json` with zero files copied.
-- Existing brains, saved model settings, drafts, scan checkpoints and spending
-  must be recovered from that source before cutover. Do not publish a blank
-  workspace or substitute local `private/brains` test fixtures.
+- The user authorized a **source-recovery Supabase cutover**, not a claim that
+  the suspended Vercel workspace was fully recovered. Eight private records and
+  both original PDFs were uploaded and read-back fingerprint verified. Main's
+  74 sources / 2,348 passages / 565 nodes / 825 edges are preserved unchanged.
+- `Astrology (recovered sources)` has its own UUID
+  `5c9e08c7-21fd-4c8e-95a1-1c6830ff092d`, three source-document nodes, 2,749
+  passages, 1,028 unique image references, and 493 requirements. It does **not**
+  impersonate the original Astrology brain or fabricate its accepted teachings.
+- Shared OpenRouter settings/writing guidance were restored; the supplied key
+  was validated using the free key endpoint and encrypted with the existing
+  session secret. Both original login accounts remain unchanged.
+- Vercel Blob remains quota-suspended. Listing its 24 objects works but actual
+  content reads are forbidden. Original cloud-only drafts, accepted Astrology
+  teachings, scan checkpoint and historical spending remain unrecovered.
+  Durable recovery metadata blocks replacement paid scans and labels spending
+  unavailable, not zero. Local fixture registries/jobs/drafts are never imported.
+- The book contains two invisible NUL characters rejected by Postgres JSONB.
+  A fingerprint-checked lossless JSON envelope preserves them exactly; logical
+  reads, lists and encrypted backups decode them without modifying source text.
 - No paid AI calls, plan upgrade, password change, source deletion, or scan reset
   is part of this migration. Preserve `BRAIN_SESSION_SECRET` unchanged so existing
   encrypted model credentials and sessions remain usable.
@@ -47,7 +60,33 @@ dedicated project ref. This generates a deployment JSON in ignored
 using the connected Supabase tool. Keep `import_map_path: deno.json` explicit on
 updates. The checked-in auth-config placeholder intentionally authorizes nobody.
 
-## Recovery and cutover procedure
+## Source-recovery cutover
+
+`scripts/recover-local-to-supabase.ts` defaults to a read-only preflight. Its
+explicit `--apply` path accepts only the dedicated project and known original
+inventories, creates missing records without overwriting different data, and
+verifies every private PDF and logical JSON hash. `--with-key` accepts the
+already-authorized model credential through hidden terminal input, never a
+command-line argument. Writing guidance stays in an ignored local file.
+
+`private/migration/local-source-recovery/manifest.json` records completion of
+this **source recovery**, separately from the incomplete legacy Blob manifest.
+`scripts/configure-supabase-production.ts --apply` rechecks its record hashes
+before configuring only the three Supabase/backend production variables.
+It does not change the session secret, users, or the old Blob store.
+
+`scripts/verify-supabase-recovery-live.ts` checks both logins, exact inventories,
+PDF/image hashes, shared settings, recovery UI and blocked paid extraction. It
+does not start a model. The old browser brain URL redirects to the explicitly
+labelled recovery brain; API brain boundaries remain strict.
+
+## Later recovery of the original cloud-only work
+
+Do not run a full migration over an actively edited recovery workspace. First
+export the old store into a separate staging destination, reconcile registry,
+settings and drafts, and verify the original checkpoint/ledger before clearing
+the recovery restriction. The strict full-cloud migration below deliberately
+refuses conflicting destination records and source-only replacements.
 
 1. Obtain legitimate read access or an export of the suspended existing store
    `secondbrain-private-library` (`store_9YLLf65V7iim2Vxp`). Do not delete it,

@@ -1,7 +1,8 @@
 export interface ProviderSpend { totalUsd: number | null; todayUtcUsd: number | null; monthUsd: number | null; keyLimitRemainingUsd: number | null; }
 export interface SpendReport {
   checkedAt: string; providerCheckedAt?: string | null; provider: string; providerSpend: ProviderSpend | null; providerError?: string;
-  extraction: { trackedUsd: number; measuredUsd: number; estimatedUsd: number; reservedUsd: number; latestJob: { spentUsd: number; capUsd: number } | null };
+  historyIncomplete?: boolean;
+  extraction: { trackedUsd: number | null; measuredUsd: number | null; estimatedUsd: number | null; reservedUsd: number | null; latestJob: { spentUsd: number; capUsd: number } | null };
 }
 const amount = (value: unknown) => typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
 export function parseProviderSpend(input: unknown): ProviderSpend {

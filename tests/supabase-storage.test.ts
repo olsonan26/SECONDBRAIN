@@ -45,6 +45,23 @@ test("gateway distinguishes missing records from outages and passes CAS versions
   assert.equal((await handler(request({ ...create, expectedEtag: read.record.etag }))).status, 409);
 });
 
+test("authorized backup root listing includes the workspace but cannot escape its namespace", async () => {
+  let calls = 0;
+  const handler = createHandler({ url: "https://project.supabase.co", serviceKey: "sb_secret_private", tokenSha256: fingerprint, fetch: async (url, init) => {
+    calls++;
+    assert.ok(String(url).endsWith("secondbrain_list_records"));
+    const body = JSON.parse(String(init?.body));
+    assert.equal(body.p_prefix, "secondbrain/");
+    return Response.json([{ key: "secondbrain/settings.json", value: {}, etag: randomUUID() }]);
+  } });
+  assert.equal((await handler(request({ op: "list", prefix: "secondbrain/", after: "" }, "invalid"))).status, 401);
+  assert.equal((await handler(request({ op: "list", prefix: "", after: "" }))).status, 400);
+  assert.equal((await handler(request({ op: "list", prefix: "secondbrain/../", after: "" }))).status, 400);
+  const result = await handler(request({ op: "list", prefix: "secondbrain/", after: "" }));
+  assert.equal(result.status, 200); assert.equal((await result.json()).records.length, 1);
+  assert.equal(calls, 1);
+});
+
 test("Supabase adapter paginates without Blob reads and fails closed on outages", () => {
   const result = spawnSync(process.execPath, ["--conditions=react-server", "--import", "tsx", "--input-type=module", "-e", `
     import assert from 'node:assert/strict';

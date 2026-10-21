@@ -1,4 +1,5 @@
 import "server-only";
+import { assertExtractionRecoverySafe } from "./recovery-state";
 import { createHash, randomUUID } from "node:crypto";
 import type { Corpus, KnowledgeJobSummary, KnowledgeStage, Passage, Settings } from "./types";
 import { HttpError } from "./auth";
@@ -117,6 +118,7 @@ export async function answerKnowledgeQuestion(id: string, brainId: string, input
 }
 
 export async function startNextKnowledgePass(id: string, brainId: string) {
+  await assertExtractionRecoverySafe();
   const initial = await readJob(id, brainId), corpus = await getCorpus(brainId);
   return summary(await updateRecord(jobKey(brainId, id), initial, job => {
     releaseExpired(job);
@@ -165,6 +167,7 @@ export async function getKnowledgeJob(id: string, brainId: string) {
     batches: job.batches.map(({ id, passageIds, phase, state, attempts, error }) => ({ id, passageIds, phase, state, attempts, error })) };
 }
 export async function createKnowledgeJob(input: { sourceIds: string[]; requirements?: string; budgetUsd?: number }, brainId: string, author: string) {
+  await assertExtractionRecoverySafe();
   await requireBrain(brainId);
   const budgetUsd = input.budgetUsd ?? 3; validateBudget(budgetUsd);
   if (!Array.isArray(input.sourceIds) || !input.sourceIds.length || input.sourceIds.length > 20 || input.sourceIds.some(id => typeof id !== "string")) throw new HttpError(400, "Choose one or more source documents in this brain.");
@@ -211,6 +214,7 @@ export async function pauseKnowledgeJob(id: string, brainId: string) {
   return summary(await updateRecord(jobKey(brainId, id), initial, job => { if (!["complete", "needs-review"].includes(job.stage)) job.stage = "paused"; logActivity(job, "checkpoint", "Pause and save requested. No new model calls will start. An already-running call may finish and save its result and cost."); job.updatedAt = stamp(); return job; }));
 }
 export async function resumeKnowledgeJob(id: string, brainId: string, input: { budgetUsd?: number } = {}) {
+  await assertExtractionRecoverySafe();
   if (input.budgetUsd !== undefined) validateBudget(input.budgetUsd);
   const initial = await readJob(id, brainId);
   return summary(await updateRecord(jobKey(brainId, id), initial, job => {
@@ -329,6 +333,7 @@ async function appendFragment(brainId: string, job: KnowledgeJob, batch: Batch, 
 }
 
 export async function stepKnowledgeJob(id: string, brainId: string) {
+  await assertExtractionRecoverySafe();
   const initial = await readJob(id, brainId), corpus = (await readRecord<Corpus>(brainKey(brainId, "corpus.json")))?.value ?? await getCorpus(brainId), settings = await getSettings();
   if (!settings.apiKey || settings.provider !== initial.provider || settings.model !== initial.model) throw new HttpError(422, "The model connection changed. Restore this job's provider and model in Settings before resuming; its writing instructions were not changed.");
   const imageCeiling = ["queued", "running"].includes(initial.stage) && initial.batches.some(batch => batch.state === "pending" && batch.passageIds.some(id => corpus.passages.some(passage => passage.id === id && passage.image))) ? await imageContextCeiling(settings.model) : 0;

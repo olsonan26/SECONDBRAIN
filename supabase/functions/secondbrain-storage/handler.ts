@@ -78,7 +78,7 @@ export function createHandler(config: Configuration) {
         return reply({ ready: true, private: true });
       }
       if (body.op === "list") {
-        if (!validKey(body.prefix) || !body.prefix.endsWith("/") || typeof body.after !== "string" || (body.after && (!validKey(body.after) || !body.after.startsWith(body.prefix)))) return reply({ error: "Invalid record prefix" }, 400);
+        if ((body.prefix !== "secondbrain/" && !validKey(body.prefix)) || !body.prefix.endsWith("/") || typeof body.after !== "string" || (body.after && (!validKey(body.after) || !body.after.startsWith(body.prefix)))) return reply({ error: "Invalid record prefix" }, 400);
         const result = await rpc("secondbrain_list_records", { p_prefix: body.prefix, p_after: body.after, p_limit: 100 });
         if (!result.ok) return translate(result);
         return reply({ records: await result.json() });

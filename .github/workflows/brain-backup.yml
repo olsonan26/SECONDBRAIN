@@ -3,9 +3,9 @@ on:
   workflow_dispatch:
     inputs:
       operation:
-        description: Verify backup tools, or create a real cloud snapshot
+        description: Snapshot configured data, select recovery/complete explicitly, or verify tools
         type: choice
-        options: [snapshot, verify-tools, assemble-sources]
+        options: [snapshot, recovery-snapshot, complete-snapshot, verify-tools, assemble-sources]
         default: snapshot
       seed_tag:
         description: Encrypted seed release for source assembly (only used by assemble-sources)
@@ -25,8 +25,9 @@ concurrency:
   cancel-in-progress: false
 jobs:
   snapshot:
-    # Automatic runs stay disabled until the real workspace has been recovered.
-    # Manual runs remain available and fail visibly if source reads are blocked.
+    # Activation first exports, restores and publishes a verified snapshot.
+    # Recovery mode protects current Supabase data without claiming the legacy
+    # Vercel-only records have been recovered. Normal complete guards stay strict.
     if: inputs.operation != 'assemble-sources' && (github.event_name == 'workflow_dispatch' || vars.BRAIN_BACKUP_ENABLED == 'true')
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -41,7 +42,7 @@ jobs:
       - run: npm ci --ignore-scripts
       - name: Verify encrypted backup and recovery safeguards
         run: node --import tsx --test tests/backup*.test.ts
-      - name: Export, encrypt, restore-check, and publish a complete snapshot
+      - name: Back up current data (recovery mode keeps legacy cloud incomplete)
         if: inputs.operation != 'verify-tools'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -50,10 +51,21 @@ jobs:
           BRAIN_SUPABASE_URL: ${{ secrets.BRAIN_SUPABASE_URL }}
           BRAIN_SUPABASE_GATEWAY_TOKEN: ${{ secrets.BRAIN_SUPABASE_GATEWAY_TOKEN }}
           BRAIN_BACKUP_BACKEND: ${{ (inputs.backend != '' && inputs.backend != 'current' && inputs.backend) || vars.BRAIN_BACKUP_BACKEND || 'blob' }}
+          BRAIN_BACKUP_MODE: ${{ (inputs.operation == 'recovery-snapshot' && 'recovery') || (inputs.operation == 'complete-snapshot' && 'complete') || vars.BRAIN_BACKUP_MODE || 'complete' }}
         run: |
-          node --import tsx scripts/brain-backup.ts cloud private/github-backups/cloud
+          if [ "$BRAIN_BACKUP_MODE" = "recovery" ]; then
+            archive_mode=recovery-snapshot
+            tag_kind=recovery
+          elif [ "$BRAIN_BACKUP_MODE" = "complete" ]; then
+            archive_mode=cloud
+            tag_kind=cloud
+          else
+            echo "Unknown backup mode; no snapshot was published."
+            exit 1
+          fi
+          node --import tsx scripts/brain-backup.ts "$archive_mode" private/github-backups/cloud
           node --import tsx scripts/brain-backup.ts restore private/github-backups/cloud private/github-backups/restored-verification
-          node --import tsx scripts/brain-backup.ts publish private/github-backups/cloud "brain-backup-cloud-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          node --import tsx scripts/brain-backup.ts publish private/github-backups/cloud "brain-backup-${tag_kind}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
   original-sources:
     if: github.event_name == 'workflow_dispatch' && inputs.operation == 'assemble-sources'
     runs-on: ubuntu-24.04

@@ -13,11 +13,12 @@ import { getQuestionProfile } from "./knowledge-question-profile";
 import { findQuestionTags } from "./knowledge-questions";
 import { retrieveWithKnowledge } from "./knowledge-retrieval";
 import { knowledgeOverview } from "./knowledge-graph";
+import { getRecoveryState } from "./recovery-state";
 
 export async function workspace(user: Workspace["user"], brainId = MAIN_BRAIN_ID): Promise<Workspace> {
   const brain = await requireBrain(brainId);
-  const [corpus, settings, drafts, runs, brains] = await Promise.all([getCorpus(brainId), getSettings(), listRecords<Draft>(brainKey(brainId, "drafts")), listRecords<Run>(brainKey(brainId, "runs")), listBrains()]);
-  return { user, brain, brains, sources: corpus.sources.map(({ content, ...source }) => source), ...knowledgeOverview(corpus),
+  const [corpus, settings, drafts, runs, brains, recovery] = await Promise.all([getCorpus(brainId), getSettings(), listRecords<Draft>(brainKey(brainId, "drafts")), listRecords<Run>(brainKey(brainId, "runs")), listBrains(), getRecoveryState()]);
+  return { user, brain, brains, recovery, sources: corpus.sources.map(({ content, ...source }) => source), ...knowledgeOverview(corpus),
     stats: { sources: corpus.sources.length, passages: corpus.passages.length, nodes: corpus.nodes.length, teachings: corpus.nodes.filter(node => node.type === "teaching").length, edges: corpus.edges.length,
       characters: corpus.sources.reduce((n, s) => n + s.characters, 0), pages: corpus.sources.reduce((n, s) => n + s.pages, 0) },
     settings: publicSettings(settings), drafts: drafts.map(presentDraft).sort((a,b) => b.updatedAt.localeCompare(a.updatedAt)), runs: runs.sort((a,b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 50),

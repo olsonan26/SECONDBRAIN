@@ -108,7 +108,8 @@ test("resumable three-worker extraction isolates storage, accounts real usage an
         const dispositions=target.map(p=>({passageId:p.id,disposition:'extracted',reason:'The complete source timing distinction is retained.'}));
         const output=data.proposedTeachings?{teachings:data.proposedTeachings.map(t=>({key:t.key,supported:true,reason:'Every assertion, alias and application tag is explicitly supported.'})),relationships:[],passages:target.map(p=>({passageId:p.id,complete:true,reason:'Every teaching is retained and all conditions are preserved.'})),gaps:[]}:data.candidate?{checks:data.candidate.teachings.map(t=>({key:t.key,supported:true,reason:'Every condition is explicitly supported by the exact source passage.'})),additions:[],relationships:[],passages:dispositions,reviewComplete:true,gaps:[]}:{teachings,relationships:[],passages:dispositions,gaps:[]};
         if(emitQuestions && !data.proposedTeachings)output.clarifications=[{passageId:target[0].id,quote:target[0].text,question:'Would this borderline teaching example be useful?',reason:'The example mixes a reusable rule with storytelling and the intended usefulness is genuinely unclear.'},{passageId:'unknown-passage',quote:target[0].text,question:'Would this unsupported question be useful?',reason:'Fixture with a nonexistent evidence passage must not become a user clarification.'}];
-        await new Promise(resolve=>setTimeout(resolve,15));
+        // Later pages may complete first; durable graph order is not page order.
+        await new Promise(resolve=>setTimeout(resolve,target[0].page===1?30:1));
         return Response.json({choices:[{finish_reason:'stop',message:{content:JSON.stringify(output)}}],usage:{prompt_tokens:1500,completion_tokens:1000,cost:.001}});
       };
       const validFetch=globalThis.fetch;
@@ -141,7 +142,7 @@ test("resumable three-worker extraction isolates storage, accounts real usage an
       const extracted=await getCorpus(brain.id);
       assert.equal(extracted.nodes.length,14);
       assert.equal(extracted.edges.length,13);
-      assert.equal(extracted.nodes.find(n=>n.type==='teaching').evidence[0].page,1);
+      assert.deepEqual(extracted.nodes.filter(n=>n.type==='teaching').map(n=>n.evidence[0].page).sort((a,b)=>a-b),passages.map(p=>p.page),'Every teaching retains its exact original page regardless of worker completion order.');
       assert.deepEqual(await getCorpus('main'),main);
       await stepKnowledgeJob(created.id,brain.id);
       assert.equal(calls,21,'Completed jobs must never call the model again.');
