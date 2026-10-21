@@ -36,6 +36,12 @@ async function main() {
     const seenScopes: string[] = [];
     const mockGraph: GraphNode[] = Array.from({ length: 2305 }, (_, index) => ({ id: `teaching-${index}`, label: index === 0 ? "Unique teaching outside initial overview" : `Astrology teaching ${index}`, type: "teaching", knowledgeKind: "interpretation", layer: "uploaded", community: "Chart interpretation", sourceIds: [realWorkspace.sources[0].id], description: "A distinct, source-backed chart-reading teaching.", degree: index, evidence: [{ passageId: "knowledge-ui-evidence", sourceId: realWorkspace.sources[0].id, page: 42, quote: "This exact quotation is a local browser fixture, not real book content." }] }));
     const fulfill = (route: Route, payload: unknown) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(payload) });
+    let spendingReads = 0, failSpending = false;
+    await context.route("**/api/spending?**", route => {
+      spendingReads++;
+      if (failSpending) return route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "Provider usage temporarily unavailable." }) });
+      return fulfill(route, { checkedAt: new Date().toISOString(), provider: "openrouter", providerSpend: { totalUsd: spendingReads === 1 ? .05 : .06 }, extraction: { trackedUsd: .0482148, measuredUsd: .0482148, estimatedUsd: 0, reservedUsd: 0, latestJob: { spentUsd: .0482148, capUsd: 10 } } });
+    });
     await context.route("**/api/knowledge/jobs**", async route => {
       const url = new URL(route.request().url());
       seenScopes.push(url.searchParams.get("brain") || "missing");
@@ -69,6 +75,17 @@ async function main() {
     const errors: string[] = [];
     page.on("pageerror", error => errors.push(error.message));
     await page.goto(origin);
+    const spending = page.getByRole("region", { name: "Model spending" });
+    await expect(spending).toContainText("$0.0500");
+    await spending.getByRole("button", { name: "Refresh spending" }).click();
+    await expect(spending).toContainText("$0.0600");
+    await expect(spending.getByRole("progressbar")).toHaveAttribute("max", "10");
+    failSpending = true;
+    await spending.getByRole("button", { name: "Refresh spending" }).click();
+    await expect(spending.getByRole("alert")).toContainText("temporarily unavailable");
+    await expect(spending).toContainText("$0.0600");
+    failSpending = false;
+    console.log("PASS: Spend refresh updates actual usage, keeps the cap separate, and retains last successful values on failure without inventing zero.");
     await page.getByRole("button", { name: "Knowledge extraction", exact: true }).click();
     const panel = page.locator(".knowledge-extraction");
     await expect(panel).toBeVisible();

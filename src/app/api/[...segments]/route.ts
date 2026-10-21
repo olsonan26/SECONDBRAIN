@@ -10,6 +10,7 @@ import { listBrains, createBrain, requireBrain } from "@/lib/brains";
 import { brainKey, MAIN_BRAIN_ID } from "@/lib/brain-scope";
 import { createKnowledgeJob, listKnowledgeJobs, getKnowledgeJob, stepKnowledgeJob, pauseKnowledgeJob, resumeKnowledgeJob } from "@/lib/knowledge";
 import { startNextKnowledgePass, knowledgeActivity, answerKnowledgeQuestion } from "@/lib/knowledge";
+import { getSpending } from "@/lib/spend";
 import { getQuestionCoverage, saveQuestionProfile } from "@/lib/knowledge-question-profile";
 import { knowledgeNodeDetail, searchKnowledgeNodes } from "@/lib/knowledge-graph";
 
@@ -44,6 +45,7 @@ async function handle(request: Request, context: Context) {
     if (brainParams.getAll("brain").length > 1) throw new HttpError(400, "Choose one active brain per request.");
     const brainId = brainParams.get("brain") ?? MAIN_BRAIN_ID;
     await requireBrain(brainId);
+    if (route === "spending" && request.method === "GET") return json(await getSpending(brainId));
     if (route === "knowledge/nodes" && request.method === "GET") {
       const input = z.object({ q: z.string().max(300).default(""), offset: z.coerce.number().int().min(0).max(1_000_000).default(0), limit: z.coerce.number().int().min(1).max(100).default(50) }).parse(Object.fromEntries(brainParams));
       return json(searchKnowledgeNodes(await getCorpus(brainId), input.q, input.offset, input.limit));
