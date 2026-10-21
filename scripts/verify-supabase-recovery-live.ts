@@ -49,7 +49,7 @@ async function main() {
       }
       const page=await context.newPage(); const errors:string[]=[];page.on("pageerror",e=>errors.push(e.message));
       await page.goto(`${origin}/?brain=${oldId}`); await page.waitForURL(`**/?brain=${recoveryId}`);
-      await expect(page.getByRole("region",{name:"Recovery status"})).toBeVisible();
+      await expect(page.getByRole("status",{name:"Recovery status"})).toBeVisible();
       await page.getByRole("button",{name:"Knowledge extraction",exact:true}).click();
       await expect(page.getByText("New AI scanning is locked while the previous scan checkpoint and spending ledger await recovery.", {exact:false})).toBeVisible();
       await expect(page.getByRole("region",{name:"Model spending"})).toContainText("Unavailable");
