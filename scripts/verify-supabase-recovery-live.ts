@@ -53,6 +53,8 @@ async function main() {
       await page.getByRole("button",{name:"Knowledge extraction",exact:true}).click();
       await expect(page.getByText("New AI scanning is locked while the previous scan checkpoint and spending ledger await recovery.", {exact:false})).toBeVisible();
       await expect(page.getByRole("region",{name:"Model spending"})).toContainText("Unavailable");
+      await expect(page.getByRole("button",{name:"Refresh spending"})).toBeEnabled({timeout:20000});
+      await expect(page.getByText("Loading saved extraction progress…",{exact:true})).not.toBeVisible({timeout:20000});
       assert.deepEqual(errors,[]);
       mkdirSync("private/migration/local-source-recovery",{recursive:true});
       await page.screenshot({path:`private/migration/local-source-recovery/${name.toLowerCase()}-live.png`,fullPage:true});
