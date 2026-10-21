@@ -14,6 +14,7 @@ export async function getSpending(brainId: string): Promise<SpendReport> {
     const response = await fetch("https://openrouter.ai/api/v1/key", { headers: { Authorization: `Bearer ${settings.apiKey}` }, cache: "no-store", signal: AbortSignal.timeout(8000) });
     if (!response.ok) throw new Error(`Provider usage unavailable (${response.status}).`);
     report.providerSpend = parseProviderSpend(await response.json());
+    report.providerCheckedAt = new Date().toISOString();
   } catch (error) { report.providerError = error instanceof Error && error.message.startsWith("Provider usage unavailable") ? error.message : "Could not refresh provider spending. Try again shortly."; }
   report.checkedAt = new Date().toISOString();
   return report;
