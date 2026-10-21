@@ -23,11 +23,21 @@ export default function KnowledgeJobControls({ job, brainId, isOwner, disabled, 
   useEffect(() => {
     if (!open) return;
     let active = true;
+    let inFlight = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     const controller = new AbortController();
-    const poll = () => { if (active) void load(controller.signal).catch(error => { if (active) setError(error.message); }); };
-    poll(); const timer = setInterval(poll, 6000);
-    return () => { active = false; controller.abort(); clearInterval(timer); };
-  }, [open, load]);
+    const poll = async () => {
+      if (!active || inFlight || document.hidden) return;
+      inFlight = true;
+      try { await load(controller.signal); }
+      catch (error) { if (active) setError(error instanceof Error ? error.message : "Could not refresh the decision log."); }
+      finally { inFlight = false; if (active && !document.hidden) timer = setTimeout(poll, ["running", "queued"].includes(job.stage) ? 7000 : 60_000); }
+    };
+    const visibility = () => { clearTimeout(timer); if (!document.hidden) void poll(); };
+    document.addEventListener("visibilitychange", visibility);
+    void poll();
+    return () => { active = false; controller.abort(); document.removeEventListener("visibilitychange", visibility); clearTimeout(timer); };
+  }, [open, load, job.stage]);
   async function answer(questionId: string, answer: "include" | "exclude") {
     try {
       const response = await fetch(`${endpoint}/answer?brain=${encodeURIComponent(brainId)}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ questionId, answer }) });

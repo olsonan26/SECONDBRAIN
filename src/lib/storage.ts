@@ -4,9 +4,18 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { brainKey, MAIN_BRAIN_ID } from "./brain-scope";
+import { ConflictError } from "./storage-errors";
+import { supabaseRead, supabaseWrite, supabaseList, supabaseReadOriginal, supabaseWriteOriginal } from "./supabase-storage";
+export { ConflictError } from "./storage-errors";
 
 const localRoot = () => path.join(process.cwd(), "private");
-export const isCloud = () => Boolean(process.env.BLOB_READ_WRITE_TOKEN || process.env.BLOB_STORE_ID);
+export function storageBackend(): "supabase" | "blob" | "local" {
+  const selected = process.env.BRAIN_STORAGE_BACKEND;
+  if (selected && !["supabase", "blob", "local"].includes(selected)) throw new Error("Unknown private storage backend");
+  if (selected) return selected as "supabase" | "blob" | "local";
+  return process.env.BLOB_READ_WRITE_TOKEN || process.env.BLOB_STORE_ID ? "blob" : "local";
+}
+export const isCloud = () => storageBackend() !== "local";
 const queue = new Map<string, Promise<unknown>>();
 
 async function renameAtomic(source: string, target: string) {
@@ -29,6 +38,7 @@ function safeKey(key: string) {
 
 export async function readRecord<T>(key: string): Promise<{ value: T; etag: string } | null> {
   const full = safeKey(key);
+  if (storageBackend() === "supabase") return supabaseRead<T>(full);
   if (isCloud()) {
     const result = await get(full, { access: "private", useCache: false, headers: { "accept-encoding": "identity", "cache-control": "no-cache" } });
     if (!result || result.statusCode !== 200) return null;
@@ -47,6 +57,7 @@ export async function readRecord<T>(key: string): Promise<{ value: T; etag: stri
 export async function writeRecord<T>(key: string, value: T, expectedEtag?: string | null): Promise<void> {
   const full = safeKey(key);
   const text = JSON.stringify(value);
+  if (storageBackend() === "supabase") { await supabaseWrite(full, value, expectedEtag); return; }
   if (isCloud()) {
     await put(full, text, { access: "private", contentType: "application/json", addRandomSuffix: false,
       ...(expectedEtag ? { ifMatch: expectedEtag, allowOverwrite: true } : {}) });
@@ -69,10 +80,9 @@ export async function writeRecord<T>(key: string, value: T, expectedEtag?: strin
   }
 }
 
-export class ConflictError extends Error {}
-
 export async function writeOriginal(id: string, format: string, bytes: Buffer, brainId = MAIN_BRAIN_ID) {
   const key = brainKey(brainId, `originals/${id}.${format}`); safeKey(key);
+  if (storageBackend() === "supabase") { await supabaseWriteOriginal(safeKey(key), bytes); return; }
   if (isCloud()) {
     await put(safeKey(key), bytes, { access: "private", addRandomSuffix: false, contentType: "application/octet-stream" });
   } else {
@@ -84,6 +94,7 @@ export async function writeOriginal(id: string, format: string, bytes: Buffer, b
 
 export async function readOriginal(id: string, format: string, brainId = MAIN_BRAIN_ID): Promise<ReadableStream<Uint8Array> | Uint8Array | null> {
   const key = brainKey(brainId, `originals/${id}.${format}`); safeKey(key);
+  if (storageBackend() === "supabase") return supabaseReadOriginal(safeKey(key));
   if (isCloud()) {
     const result = await get(safeKey(key), { access: "private" });
     return result?.statusCode === 200 ? result.stream : null;
@@ -114,6 +125,7 @@ export async function updateRecord<T>(key: string, initial: T, mutate: (value: T
 }
 
 export async function listRecords<T>(prefix: string): Promise<T[]> {
+  if (storageBackend() === "supabase") return supabaseList<T>(safeKey(prefix + "/"));
   if (!isCloud()) {
     if (process.env.VERCEL) return [];
     try {
