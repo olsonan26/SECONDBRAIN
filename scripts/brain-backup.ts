@@ -150,8 +150,17 @@ async function main() {
     const directory = path.resolve(directoryArgument), manifest = JSON.parse(await readFile(path.join(directory, "manifest.json"), "utf8")) as BackupManifest;
     for (const part of manifest.parts) if (!/^archive\.part-\d{3}\.bin$/.test(part.name) || await fileHash(path.join(directory, part.name)) !== part.sha256) throw new Error("Backup part verification failed before upload");
     const notes = `Encrypted Secondbrain recovery archive.\n\nFiles: ${manifest.files}. Original bytes: ${manifest.originalBytes}. Complete cloud state: ${manifest.completeCloudState}.\n\n${manifest.description}\n\nUse scripts/brain-backup.ts restore with the separate recovery key. The key and plaintext secrets are NOT release assets. No AI calls are needed to restore. Download every archive.part file and manifest.json. Never overwrite a live workspace before verifying the restore.\n`;
-    await command(["release", "create", tagArgument, "--repo", repository, "--draft", "--prerelease", "--latest=false", "--target", "main", "--title", manifest.completeCloudState ? "Brain backup — complete cloud state" : "Brain backup — original sources (cloud state still missing)", "--notes-file", "-"], notes);
+    let previous: { draft: boolean; assets: { name: string; size: number; digest: string }[] } | undefined;
+    try { previous = JSON.parse(await command(["api", `repos/${repository}/releases/tags/${tagArgument}`])); }
+    catch (error) { if (!(error instanceof Error) || !error.message.includes("404")) throw error; }
+    if (previous && !previous.draft) throw new Error("Release is already published; use a new tag rather than overwriting a recovery snapshot");
+    if (!previous) await command(["release", "create", tagArgument, "--repo", repository, "--draft", "--prerelease", "--latest=false", "--target", "main", "--title", manifest.completeCloudState ? "Brain backup — complete cloud state" : "Brain backup — original sources (cloud state still missing)", "--notes-file", "-"], notes);
     for (const file of [...manifest.parts.map(p => p.name), "manifest.json"]) {
+      const existing = previous?.assets.find(asset => asset.name === file);
+      if (existing) {
+        if (existing.size !== (await stat(path.join(directory, file))).size || existing.digest !== `sha256:${await fileHash(path.join(directory, file))}`) throw new Error("Existing draft asset differs; refusing to overwrite it");
+        console.log(JSON.stringify({ phase: "already-uploaded-and-verified", asset: file })); continue;
+      }
       console.log(JSON.stringify({ phase: "uploading", asset: file }));
       await command(["release", "upload", tagArgument, path.join(directory, file), "--repo", repository]);
     }
@@ -160,6 +169,8 @@ async function main() {
       const remote = assets.find((asset: { name: string }) => asset.name === part.name);
       if (!remote || remote.size !== part.bytes || remote.digest !== `sha256:${part.sha256}`) throw new Error("GitHub asset size/hash mismatch; release left as a draft");
     }
+    const manifestAsset = assets.find((asset: { name: string }) => asset.name === "manifest.json");
+    if (manifestAsset?.digest !== `sha256:${await fileHash(path.join(directory, "manifest.json"))}`) throw new Error("GitHub manifest hash mismatch; release left as a draft");
     await command(["release", "edit", tagArgument, "--repo", repository, "--draft=false", "--latest=false"]);
     console.log(JSON.stringify({ published: true, url: `https://github.com/${repository}/releases/tag/${tagArgument}`, completeCloudState: manifest.completeCloudState }));
   } else if (mode === "install-secrets") {

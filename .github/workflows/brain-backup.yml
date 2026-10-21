@@ -2,6 +2,11 @@ name: Brain recovery backup
 on:
   workflow_dispatch:
     inputs:
+      operation:
+        description: Verify backup tools, or create a real cloud snapshot
+        type: choice
+        options: [snapshot, verify-tools]
+        default: snapshot
       backend:
         description: Source containing the real workspace (empty/unmigrated storage is rejected)
         type: choice
@@ -30,7 +35,10 @@ jobs:
           node-version: '24'
           cache: npm
       - run: npm ci --ignore-scripts
+      - name: Verify encrypted backup and recovery safeguards
+        run: node --import tsx --test tests/backup-format.test.ts
       - name: Export, encrypt, restore-check, and publish a complete snapshot
+        if: inputs.operation != 'verify-tools'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           BRAIN_BACKUP_KEY: ${{ secrets.BRAIN_BACKUP_KEY }}
