@@ -56,13 +56,18 @@ export default function KnowledgeExtraction({ brainId, sources, isOwner, onGraph
   const callback = useRef(onGraphChanged);
   const mounted = useRef(true);
   const graphStamp = useRef("");
+  const graphRefreshUntil = useRef(0);
   useEffect(() => { callback.current = onGraphChanged; }, [onGraphChanged]);
 
   const updateJobs = useCallback((next: KnowledgeJobSummary[]) => {
     if (!mounted.current) return;
     setJobs(next);
     const stamp = next.map(job => `${job.id}:${job.nodesAdded}:${job.edgesAdded}`).join("|");
-    if (graphStamp.current && graphStamp.current !== stamp) void Promise.resolve().then(() => callback.current?.()).catch(() => {});
+    // Another server instance may briefly retain an older corpus cache after a
+    // checkpoint. Reconcile for 30 seconds, including the first progress load,
+    // so pausing immediately after a save cannot leave the last nodes invisible.
+    if (graphStamp.current !== stamp) graphRefreshUntil.current = Date.now() + 30_000;
+    if (next.length && Date.now() < graphRefreshUntil.current) void Promise.resolve().then(() => callback.current?.()).catch(() => {});
     graphStamp.current = stamp;
   }, []);
   const load = useCallback(async () => {
