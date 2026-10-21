@@ -18,9 +18,9 @@ async function recoveryKey(create = false) {
   }
   return parseBackupKey(await readFile(keyPath, "utf8"));
 }
-async function command(args: string[], input?: string) {
+async function command(args: string[], input?: string, program = "gh") {
   return new Promise<string>((resolve, reject) => {
-    const child = spawn("gh", args, { windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
+    const child = spawn(program, args, { windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
     let output = "", error = "";
     child.stdout.on("data", chunk => { output += chunk; });
     child.stderr.on("data", chunk => { error += chunk; });
@@ -191,11 +191,25 @@ async function main() {
     if (manifestAsset?.digest !== `sha256:${await fileHash(path.join(directory, "manifest.json"))}`) throw new Error("GitHub manifest hash mismatch; release left as a draft");
     await command(["release", "edit", tagArgument, "--repo", repository, "--draft=false", "--latest=false"]);
     console.log(JSON.stringify({ published: true, url: `https://github.com/${repository}/releases/tag/${tagArgument}`, completeCloudState: manifest.completeCloudState }));
+  } else if (mode === "activate-daily") {
+    const backend = process.env.BRAIN_BACKUP_BACKEND;
+    if (!["blob", "supabase"].includes(backend || "")) throw new Error("Explicitly select the recovered live backend before activation");
+    const tag = `brain-backup-cloud-${new Date().toISOString().replace(/[^0-9]/g, "")}`;
+    const directory = path.join(root, tag);
+    const script = path.resolve("scripts/brain-backup.ts");
+    await command(["--import", "tsx", script, "cloud", directory], undefined, process.execPath);
+    await command(["--import", "tsx", script, "restore", directory, `${directory}-verified`], undefined, process.execPath);
+    await command(["--import", "tsx", script, "publish", directory, tag], undefined, process.execPath);
+    // These are deliberately last: a failed or empty snapshot never activates
+    // a misleading automatic backup schedule.
+    await command(["variable", "set", "BRAIN_BACKUP_BACKEND", "--repo", repository, "--body", backend!]);
+    await command(["variable", "set", "BRAIN_BACKUP_ENABLED", "--repo", repository, "--body", "true"]);
+    console.log(JSON.stringify({ dailyBackupsEnabled: true, firstCompleteSnapshot: `https://github.com/${repository}/releases/tag/${tag}` }));
   } else if (mode === "install-secrets") {
     const key = await recoveryKey();
     await command(["secret", "set", "BRAIN_BACKUP_KEY", "--repo", repository], key.toString("base64url"));
     for (const name of ["BLOB_READ_WRITE_TOKEN", "BRAIN_SUPABASE_GATEWAY_TOKEN", "BRAIN_SUPABASE_URL"]) if (process.env[name]) await command(["secret", "set", name, "--repo", repository], process.env[name]);
     console.log(JSON.stringify({ repositorySecretsStored: true, plaintextPublished: false }));
-  } else throw new Error("Choose local, seed, cloud, restore, publish, or install-secrets");
+  } else throw new Error("Choose local, seed, cloud, restore, publish, activate-daily, or install-secrets");
 }
 main().catch(error => { console.error(error instanceof Error ? error.message : "Backup failed; no complete snapshot was published"); process.exitCode = 1; });

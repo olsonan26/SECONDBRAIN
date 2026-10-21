@@ -40,7 +40,7 @@ jobs:
           cache: npm
       - run: npm ci --ignore-scripts
       - name: Verify encrypted backup and recovery safeguards
-        run: node --import tsx --test tests/backup-format.test.ts
+        run: node --import tsx --test tests/backup*.test.ts
       - name: Export, encrypt, restore-check, and publish a complete snapshot
         if: inputs.operation != 'verify-tools'
         env:

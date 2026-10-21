@@ -49,8 +49,17 @@ node --import tsx scripts/brain-backup.ts restore PATH-TO-ARCHIVE NEW-EMPTY-DEST
 Restore refuses an existing destination. It checks ciphertext hashes and
 authentication before extracting, rejects unsafe paths/duplicates, and verifies
 all restored file hashes. Cloud records restore below `cloud/secondbrain/`.
-An operator can import those exact records/originals into another private store,
-preserving the session secret needed to decrypt saved model credentials. Do not
+For a verified complete cloud restore, inspect the import without writing:
+
+```powershell
+node --conditions=react-server --env-file=.env.supabase.local --import tsx scripts/restore-brain-to-supabase.ts PATH-TO-RESTORED-DATA
+# After checking the destination, repeat with --apply to create missing records.
+```
+
+The importer rechecks every file hash and refuses source-only archives or a
+destination containing different data. It verifies each saved record/original,
+does not reset checkpoints or spending, and never automatically switches the
+production site. Preserve the session secret needed to decrypt saved model credentials. Do not
 reset checkpoints, spend counters, or replace the live brain with a test fixture.
 
 ## Future snapshots
@@ -61,10 +70,23 @@ project is rejected rather than published as a successful backup.
 
 The daily schedule is configured, but `BRAIN_BACKUP_ENABLED` stays `false` until
 the Vercel-held workspace is recovered and the first complete cloud snapshot is
-verified. Then set `BRAIN_BACKUP_BACKEND=supabase` and enable the daily job using
-repository variables. A daily backup is not real-time protection: changes after
+verified. To activate safely, set `BRAIN_BACKUP_BACKEND=supabase`, load the server
+connection, and run `node --import tsx scripts/brain-backup.ts activate-daily`.
+That command exports, restores, and publishes the first full snapshot before it
+enables the schedule. If source access is blocked or Supabase is empty, it stops
+without enabling anything. A daily backup is not real-time protection: changes after
 the last successful snapshot are not yet protected. Run a manual backup after
 important work. Existing backups are not automatically deleted or overwritten.
 
 The current Vercel quota block still prevents retrieving the latest 24 cloud
 objects. GitHub cannot back up bytes the source provider refuses to return.
+
+Large source archives can also be assembled directly on GitHub's standard
+runner: a small encrypted `seed` holds local OCR/PDF/configuration data and exact
+Drive IDs, JPEG MIME metadata, byte sizes and SHA-256 values. The source-assembly
+workflow fetches only those supplied public Drive images, checks every original
+fingerprint, rebuilds the archive, and performs a full restore before publication.
+It never changes Drive permissions or uses model credits. A seed by itself does
+not contain the JPEG bytes and must not be called a complete original-source
+backup. Interrupted draft uploads resume only when existing asset hashes match;
+conflicting assets are never overwritten.

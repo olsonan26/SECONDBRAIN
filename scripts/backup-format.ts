@@ -63,7 +63,7 @@ export async function createBackup(entries: BackupEntry[], directory: string, ke
   const names = new Set<string>();
   const inventory: { source: string; name: string; bytes: number; sha256: string }[] = [];
   for (const entry of entries) {
-    if (!validBackupPath(entry.name) || names.has(entry.name)) throw new Error("Unsafe or duplicate archive path");
+    if (!validBackupPath(entry.name) || entry.name === ".secondbrain-restore-verified.json" || names.has(entry.name)) throw new Error("Unsafe or duplicate archive path");
     names.add(entry.name);
     const information = await stat(entry.source);
     if (!information.isFile()) throw new Error("Archive inputs must be regular files");
@@ -147,6 +147,7 @@ export async function restoreBackup(directory: string, destination: string, key:
     const header = JSON.parse(await reader.line());
     if (header.files !== manifest.files || header.originalBytes !== manifest.originalBytes) throw new Error("Inventory mismatch");
     const names = new Set<string>();
+    const restoredFiles: { name: string; bytes: number; sha256: string }[] = [];
     let total = 0;
     for (let i = 0; i < manifest.files; i++) {
       const item = JSON.parse(await reader.line());
@@ -155,9 +156,11 @@ export async function restoreBackup(directory: string, destination: string, key:
       const target = path.join(destination, ...item.name.split("/"));
       await mkdir(path.dirname(target), { recursive: true });
       if (await reader.copy(item.bytes, target) !== item.sha256) throw new Error("Restored file hash mismatch");
+      restoredFiles.push({ name: item.name, bytes: item.bytes, sha256: item.sha256 });
       total += item.bytes;
     }
     if (JSON.parse(await reader.line()).end !== true || !await reader.eof() || total !== manifest.originalBytes) throw new Error("Incomplete archive inventory");
+    await writeFile(path.join(destination, ".secondbrain-restore-verified.json"), JSON.stringify({ version: 1, completeCloudState: manifest.completeCloudState, archiveManifestSha256: await fileHash(path.join(directory, "manifest.json")), files: restoredFiles }), { flag: "wx", mode: 0o600 });
     return { files: manifest.files, bytes: total, completeCloudState: manifest.completeCloudState };
   } finally { await reader?.close(); await output.close().catch(() => {}); await unlink(temp).catch(() => {}); }
 }

@@ -20,6 +20,9 @@ test("encrypted multipart backups restore every byte, reject tampering/wrong key
     const destination = path.join(root, "restored");
     assert.deepEqual(await restoreBackup(archive, destination, key), { files: 2, bytes: 9000 + Buffer.byteLength("private-test-credential-not-for-publication"), completeCloudState: false });
     assert.deepEqual(await readFile(path.join(destination, "photos/page.jpg")), bytes);
+    const marker = JSON.parse(await readFile(path.join(destination, ".secondbrain-restore-verified.json"), "utf8"));
+    assert.equal(marker.completeCloudState, false);
+    assert.equal(marker.files.length, 2);
     assert.equal(await readFile(path.join(destination, "recovery/config.txt"), "utf8"), "private-test-credential-not-for-publication");
     await assert.rejects(() => restoreBackup(archive, destination, key), /exist/i);
     const file = path.join(archive, manifest.parts[0].name), corrupt = await readFile(file);

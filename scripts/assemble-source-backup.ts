@@ -48,6 +48,7 @@ async function main() {
   const entries: BackupEntry[] = [];
   async function collect(directory: string, prefix = "") {
     for (const item of await readdir(directory, { withFileTypes: true })) {
+      if (item.name === ".secondbrain-restore-verified.json") continue;
       const name = prefix ? `${prefix}/${item.name}` : item.name, file = path.join(directory, item.name);
       if (item.isDirectory()) await collect(file, name);
       else if (item.isFile()) entries.push({ source: file, name });
