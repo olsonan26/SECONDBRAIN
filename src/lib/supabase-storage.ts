@@ -13,19 +13,28 @@ function configuration() {
   return { url: `${url}/functions/v1/secondbrain-storage`, token };
 }
 
-async function call(query: string, init: RequestInit) {
+async function call(query: string, init: RequestInit, readOnly = false) {
   const { url, token } = configuration();
-  const response = await fetch(url + query, {
-    ...init, cache: "no-store", signal: AbortSignal.timeout(60_000),
-    headers: { ...init.headers, Authorization: `Bearer ${token}` },
-  });
-  if (response.status === 409) throw new ConflictError("This item changed. Reload it before saving.");
-  if (!response.ok) throw new Error(`Private Supabase storage is unavailable (${response.status}). No fallback or reset was performed.`);
-  return response;
+  for (let attempt = 0; ; attempt++) {
+    const response = await fetch(url + query, {
+      ...init, cache: "no-store", signal: AbortSignal.timeout(60_000),
+      headers: { ...init.headers, Authorization: `Bearer ${token}` },
+    });
+    // Only replay side-effect-free reads. A failed write may already have committed.
+    if (readOnly && attempt === 0 && [429, 502, 503, 504].includes(response.status)) {
+      await response.body?.cancel();
+      await new Promise(resolve => setTimeout(resolve, 500));
+      continue;
+    }
+    if (response.status === 409) throw new ConflictError("This item changed. Reload it before saving.");
+    if (!response.ok) throw new Error(`Private Supabase storage is unavailable (${response.status}). No fallback or reset was performed.`);
+    return response;
+  }
 }
 
 async function json<T>(body: unknown): Promise<T> {
-  return (await call("", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })).json() as Promise<T>;
+  const readOnly = !!body && typeof body === "object" && "op" in body && (body.op === "read" || body.op === "list");
+  return (await call("", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }, readOnly)).json() as Promise<T>;
 }
 
 export const supabaseRead = <T>(key: string) => json<{ record: { value: unknown; etag: string } | null }>({ op: "read", key }).then(r => r.record ? { ...r.record, value: decodeSupabaseRecord<T>(r.record.value) } : null);
@@ -48,7 +57,7 @@ export async function supabaseWriteOriginal(key: string, bytes: Uint8Array) {
   await call(`?key=${encodeURIComponent(key)}`, { method: "PUT", headers: { "Content-Type": "application/octet-stream" }, body: bytes as BodyInit });
 }
 export async function supabaseReadOriginal(key: string): Promise<ReadableStream<Uint8Array> | null> {
-  const response = await call(`?key=${encodeURIComponent(key)}`, { method: "GET" });
+  const response = await call(`?key=${encodeURIComponent(key)}`, { method: "GET" }, true);
   // The gateway uses 204 only for an explicitly missing object, not outages.
   return response.status === 204 ? null : response.body;
 }

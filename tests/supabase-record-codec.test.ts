@@ -28,3 +28,14 @@ test("encoded record corruption and invalid reserved envelopes fail closed", () 
   assert.throws(() => decodeSupabaseRecord({ ...encoded, jsonBase64: "?" }), /encoding/);
   assert.throws(() => decodeSupabaseRecord({ ...encoded, extra: true }), /encoding/);
 });
+
+test("large books use bounded lossless compression and retain legacy decoding", () => {
+  const record = { text: ("Exact source words, glyphs \u2609 and NUL \u0000.\n").repeat(20000) };
+  const encoded = encodeSupabaseRecord(record);
+  assert.ok(JSON.stringify(encoded).length < JSON.stringify(record).length / 5);
+  assert.deepEqual(decodeSupabaseRecord(encoded), record);
+  const json = JSON.stringify(record);
+  const legacy = { __secondbrain_record_encoding__: "json-base64-v1", jsonBase64: Buffer.from(json).toString("base64"), sha256: createHash("sha256").update(json).digest("hex") };
+  assert.deepEqual(decodeSupabaseRecord(legacy), record);
+  assert.throws(() => decodeSupabaseRecord({ ...encoded as object, sha256: "0".repeat(64) }), /fingerprint/);
+});
