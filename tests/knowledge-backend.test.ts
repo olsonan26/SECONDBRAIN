@@ -122,15 +122,15 @@ test("resumable three-worker extraction isolates storage, accounts real usage an
       await stepKnowledgeJob(created.id,brain.id);
       assert.equal(calls,0);
       await resumeKnowledgeJob(created.id,brain.id);
-      for(let i=0;i<8;i++) {
+      for(let i=0;i<24;i++) {
         await Promise.all(Array.from({length:4},()=>stepKnowledgeJob(created.id,brain.id)));
         if((await getKnowledgeJob(created.id,brain.id)).stage==='complete')break;
       }
       const finished=await getKnowledgeJob(created.id,brain.id);
       assert.equal(finished.stage,'complete',JSON.stringify(finished));
-      assert.equal(calls,9,'Three extraction calls, three omission reviews and three final independent verifications only.');
-      assert.equal(finished.costUsd,.009);
-      assert.equal(finished.measuredCostUsd,.009);
+      assert.equal(calls,21,'Seven two-passage batches each require extraction, omission review and final verification.');
+      assert.equal(finished.costUsd,.021);
+      assert.equal(finished.measuredCostUsd,.021);
       assert.equal(finished.estimatedCostUsd,0);
       assert.ok(finished.estimatedTotalCostUsd>0,'The forecast is distinct from charged estimated usage.');
       assert.equal(finished.reservedUsd,0);
@@ -143,11 +143,11 @@ test("resumable three-worker extraction isolates storage, accounts real usage an
       assert.equal(extracted.nodes.find(n=>n.type==='teaching').evidence[0].page,1);
       assert.deepEqual(await getCorpus('main'),main);
       await stepKnowledgeJob(created.id,brain.id);
-      assert.equal(calls,9,'Completed jobs must never call the model again.');
+      assert.equal(calls,21,'Completed jobs must never call the model again.');
       const capped=await createKnowledgeJob({sourceIds:['book'],budgetUsd:.01},brain.id,'Alex');
       const stopped=await stepKnowledgeJob(capped.id,brain.id);
       assert.equal(stopped.stage,'paused-budget');
-      assert.equal(calls,9,'Insufficient reservation must stop before a paid call.');
+      assert.equal(calls,21,'Insufficient reservation must stop before a paid call.');
       await assert.rejects(()=>resumeKnowledgeJob(capped.id,brain.id,{budgetUsd:11}),/higher limit has not been authorized/);
       assert.equal((await listKnowledgeJobs(brain.id)).length,2);
       const recoveryBrain=await createBrain('Crash recovery fixture','Test only','Alex');
@@ -211,7 +211,22 @@ test("resumable three-worker extraction isolates storage, accounts real usage an
       globalThis.fetch=async()=>Response.json({choices:[{finish_reason:'length',message:{content:'{'}}],usage:{prompt_tokens:100}});
       const partialUsage=await stepKnowledgeJob(truncated.id,failedBrain.id);
       assert.ok(partialUsage.costUsd-timedOut.costUsd>.015,'Partial usage with missing completion tokens must charge the full reserved maximum, not a tiny input-only estimate.');
-      console.log('PASS: three-worker durable extraction, exact evidence, source isolation and hard budget.');
+      const splitBrain=await createBrain('Adaptive split fixture','Test only','Alex');
+      await writeRecord(brainKey(splitBrain.id,'corpus.json'),{...main,sources:[source],passages:passages.slice(0,2),warnings:[]});
+      const splitJob=await createKnowledgeJob({sourceIds:['book'],budgetUsd:1},splitBrain.id,'Alex');
+      globalThis.fetch=async()=>Response.json({choices:[{finish_reason:'length',message:{content:'{'}}],usage:{prompt_tokens:100,completion_tokens:12000,cost:.001}});
+      const split=await stepKnowledgeJob(splitJob.id,splitBrain.id);
+      assert.equal(split.nodesAdded,0);
+      const splitDetail=await getKnowledgeJob(splitJob.id,splitBrain.id);
+      assert.equal(splitDetail.batches.length,2,'Truncated multipassage batches become single-passage batches.');
+      assert.deepEqual(splitDetail.batches.flatMap(b=>b.passageIds).sort(),passages.slice(0,2).map(p=>p.id).sort(),'Splitting preserves every target exactly once.');
+      globalThis.fetch=validFetch;
+      for(let i=0;i<6;i++)await stepKnowledgeJob(splitJob.id,splitBrain.id);
+      const splitDone=await getKnowledgeJob(splitJob.id,splitBrain.id);
+      assert.equal(splitDone.stage,'complete');
+      assert.equal(splitDone.nodesAdded,2);
+      assert.equal(splitDone.costUsd,.007,'The original truncated call remains included in spending.');
+      console.log('PASS: three-worker durable extraction, exact evidence, source isolation, adaptive splitting and hard budget.');
     } finally {
       process.chdir(originalCwd);
       assert.ok(path.resolve(temp).startsWith(path.resolve(os.tmpdir())+path.sep+'secondbrain-knowledge-'));

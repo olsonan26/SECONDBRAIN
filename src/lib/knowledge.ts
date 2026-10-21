@@ -16,7 +16,7 @@ const MAX_ATTEMPTS = 3;
 const MAX_WORKERS = 3;
 const INPUT_RATE = 0.35 / 1_000_000;
 const OUTPUT_RATE = 1.4 / 1_000_000;
-const BATCH_SIZE = 6;
+const BATCH_SIZE = 2;
 type Phase = "extract" | "review" | "verify";
 type Batch = {
   id: string; passageIds: string[]; phase: Phase; state: "pending" | "leased" | "done" | "failed";
@@ -191,6 +191,7 @@ function promptFor(job: KnowledgeJob, batch: Batch, passages: Passage[], corpus:
     { role: "user", content: JSON.stringify({ sourcePolicy: "Extract all teachings whether or not a wish-list question mentions them. Boundary context may clarify meaning but cite ONLY the supplied target passages, which are the ones audited in this batch.", coverageWishListNotEvidence: requirements,
       targetPassages: passages.map(p => ({ id: p.id, sourceId: p.sourceId, page: p.page, section: p.section, text: p.text })),
       boundaryContextNotTarget: boundary.map(p => ({ page: p.page, text: p.text.slice(0, 2200) })),
+      ...(batch.error ? { previousValidationFailureNotEvidence: batch.error } : {}),
       ...(batch.phase === "review" ? { candidate: batch.candidate } : batch.phase === "verify" ? { proposedTeachings: [...(batch.candidate?.teachings ?? []), ...(batch.review?.additions ?? [])], proposedRelationships: batch.review?.relationships ?? [], proposedPassages: batch.review?.passages ?? [] } : {}) }) },
   ];
 }
@@ -277,7 +278,7 @@ export async function stepKnowledgeJob(id: string, brainId: string) {
   const batch = claimed.batches.find(b => b.id === claimedId)!;
   const passages = batch.passageIds.map(id => corpus.passages.find(p => p.id === id)!);
   const connection = modelConnection(settings);
-  let usage: Usage | undefined, resultAccepted = false, failure = "", fatalStatus = 0;
+  let usage: Usage | undefined, resultAccepted = false, failure = "", fatalStatus = 0, truncated = false;
   let extracted: Extraction | undefined;
   let reviewedCandidate: KnowledgeReview | undefined;
   let reviewed: Fragment | undefined;
@@ -289,7 +290,7 @@ export async function stepKnowledgeJob(id: string, brainId: string) {
     if (!response.ok) { if ([400, 401, 402, 403, 404, 429].includes(response.status)) fatalStatus = response.status; throw new Error(modelError(connection.label, response.status)); }
     const result = await response.json(); usage = result.usage;
     if (result.error) { const status = Number(result.error.code) || 502; if ([400, 401, 402, 403, 404, 429].includes(status)) fatalStatus = status; throw new Error(modelError(connection.label, status)); }
-    if (result.choices?.[0]?.finish_reason !== "stop") throw new Error("The model response was truncated or did not finish normally. No partial knowledge was accepted.");
+    if (result.choices?.[0]?.finish_reason !== "stop") { truncated = result.choices?.[0]?.finish_reason === "length"; throw new Error("The model response was truncated or did not finish normally. No partial knowledge was accepted."); }
     const parsed = JSON.parse(result.choices?.[0]?.message?.content ?? "");
     if (batch.phase === "extract") extracted = extractionSchema.parse(parsed);
     else if (batch.phase === "review") reviewedCandidate = reviewSchema.parse(parsed);
@@ -303,7 +304,8 @@ export async function stepKnowledgeJob(id: string, brainId: string) {
     }
     resultAccepted = true;
   } catch (error) {
-    failure = error instanceof Error && error.name === "ZodError" ? "The model returned invalid extraction data. No partial result was accepted." : error instanceof SyntaxError ? "The model returned malformed JSON. No partial result was accepted." : error instanceof Error && ["TimeoutError", "AbortError"].includes(error.name) ? "The model timed out; this bounded call may have been billed. Progress is saved and the batch can retry." : error instanceof Error ? error.message.slice(0, 500) : "The extraction request failed.";
+    const schemaIssues = error instanceof Error && error.name === "ZodError" ? (error as unknown as { issues: { path: (string | number)[]; message: string }[] }).issues?.slice(0, 5).map(issue => `${issue.path.join(".")}: ${issue.message}`).join("; ") : "";
+    failure = error instanceof Error && error.name === "ZodError" ? `The model returned invalid extraction data. No partial result was accepted. ${schemaIssues}`.slice(0, 500) : error instanceof SyntaxError ? "The model returned malformed JSON. No partial result was accepted." : error instanceof Error && ["TimeoutError", "AbortError"].includes(error.name) ? "The model timed out; this bounded call may have been billed. Progress is saved and the batch can retry." : error instanceof Error ? error.message.slice(0, 500) : "The extraction request failed.";
     failure = failure.replace(/Bearer\s+\S+|sk-(?:or-)?[\w-]+/gi, "[redacted]");
   }
   const accounted = accountedUsage(usage, batch.lease!.reservation);
@@ -321,7 +323,13 @@ export async function stepKnowledgeJob(id: string, brainId: string) {
       job.nodesAdded += receipt.nodes; job.edgesAdded += receipt.edges;
       for (const warning of receipt.warnings ?? []) addWarning(job, warning);
     } else {
-      currentBatch.error = failure; currentBatch.state = fatalStatus && fatalStatus !== 429 || currentBatch.attempts >= MAX_ATTEMPTS ? "failed" : "pending"; job.error = failure;
+      if (truncated && currentBatch.passageIds.length > 1) {
+        const offset = job.batches.indexOf(currentBatch);
+        const parts: Batch[] = currentBatch.passageIds.map((passageId, index) => ({ id: `${currentBatch.id}.split${index}`, passageIds: [passageId], phase: "extract", state: "pending", attempts: 0, revision: currentBatch.revision + 1 }));
+        job.batches.splice(offset, 1, ...parts);
+        addWarning(job, "A truncated batch was split into individual passages for complete extraction and independent review. Its spent cost remains counted; no partial nodes were accepted.");
+        job.error = "An oversized model response was safely split into smaller batches.";
+      } else { currentBatch.error = failure; currentBatch.state = fatalStatus && fatalStatus !== 429 || currentBatch.attempts >= MAX_ATTEMPTS ? "failed" : "pending"; job.error = failure; }
       if (currentBatch.state === "failed") for (const audit of job.passages) if (currentBatch.passageIds.includes(audit.passageId)) { audit.disposition = "unresolved"; audit.reason = `Repeated ${currentBatch.phase} failure: ${failure}`; }
       if (fatalStatus) job.stage = fatalStatus === 429 ? "paused" : "failed";
     }
