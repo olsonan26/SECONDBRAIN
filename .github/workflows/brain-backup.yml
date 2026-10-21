@@ -1,0 +1,44 @@
+name: Brain recovery backup
+on:
+  workflow_dispatch:
+    inputs:
+      backend:
+        description: Source containing the real workspace (empty/unmigrated storage is rejected)
+        type: choice
+        options: [current, blob, supabase]
+        default: current
+  schedule:
+    - cron: '23 8 * * *'
+permissions:
+  contents: write
+concurrency:
+  group: secondbrain-recovery-backup
+  cancel-in-progress: false
+jobs:
+  snapshot:
+    # Automatic runs stay disabled until the real workspace has been recovered.
+    # Manual runs remain available and fail visibly if source reads are blocked.
+    if: github.event_name == 'workflow_dispatch' || vars.BRAIN_BACKUP_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - name: Export, encrypt, restore-check, and publish a complete snapshot
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BRAIN_BACKUP_KEY: ${{ secrets.BRAIN_BACKUP_KEY }}
+          BLOB_READ_WRITE_TOKEN: ${{ secrets.BLOB_READ_WRITE_TOKEN }}
+          BRAIN_SUPABASE_URL: ${{ secrets.BRAIN_SUPABASE_URL }}
+          BRAIN_SUPABASE_GATEWAY_TOKEN: ${{ secrets.BRAIN_SUPABASE_GATEWAY_TOKEN }}
+          BRAIN_BACKUP_BACKEND: ${{ (inputs.backend != '' && inputs.backend != 'current' && inputs.backend) || vars.BRAIN_BACKUP_BACKEND || 'blob' }}
+        run: |
+          node --import tsx scripts/brain-backup.ts cloud private/github-backups/cloud
+          node --import tsx scripts/brain-backup.ts restore private/github-backups/cloud private/github-backups/restored-verification
+          node --import tsx scripts/brain-backup.ts publish private/github-backups/cloud "brain-backup-cloud-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
