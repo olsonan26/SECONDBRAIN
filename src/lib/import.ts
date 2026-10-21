@@ -10,8 +10,11 @@ import { createPassages } from "../../scripts/import-brain";
 import { brainKey, MAIN_BRAIN_ID } from "./brain-scope";
 import { MAX_EXTRACTED_CHARACTERS, MAX_UPLOAD_BYTES, uploadValidationError } from "./import-limits";
 
-export async function importFile(file: File, brainId = MAIN_BRAIN_ID) {
-  const invalid = uploadValidationError(file);
+export async function importFile(file: File, brainId = MAIN_BRAIN_ID, localAdmin = false) {
+  // Operator-only local import avoids the HTTP hosting request limit, not text
+  // validation. No API route accepts or forwards this option.
+  if (localAdmin && (!/\.pdf$/i.test(file.name) || file.size > 20_000_000)) throw new HttpError(413, "Local operator imports accept PDFs up to 20 MB only.");
+  const invalid = uploadValidationError({ name: file.name, size: localAdmin ? Math.min(file.size, MAX_UPLOAD_BYTES) : file.size });
   if (invalid) throw new HttpError(file.size > MAX_UPLOAD_BYTES ? 413 : 422, invalid);
   const bytes = Buffer.from(await file.arrayBuffer());
   const filename = file.name.replace(/[\\/\x00-\x1f]/g, "_").slice(0, 220);

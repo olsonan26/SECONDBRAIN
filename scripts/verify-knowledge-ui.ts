@@ -52,7 +52,7 @@ async function main() {
       return fulfill(route, { jobs: [job] });
     });
     await context.route("**/api/workspace**", route => fulfill(route, { ...realWorkspace, nodes: mockGraph, edges: [{ id: "fixture-edge", source: "teaching-0", target: "teaching-2304", relation: "explains", confidence: "EXTRACTED", score: 1, sourceIds: [realWorkspace.sources[0].id] }], stats: { ...realWorkspace.stats, nodes: mockGraph.length, edges: 1 } }));
-    const graphCorpus = { ...realWorkspace, nodes: mockGraph, passages: [], edges: [{ id: "fixture-edge", source: "teaching-0", target: "teaching-2304", relation: "explains", confidence: "EXTRACTED" as const, score: 1, sourceIds: [realWorkspace.sources[0].id] }] };
+    const graphCorpus = { ...realWorkspace, version: 1 as const, importedAt: "fixture", snapshotDate: "fixture", warnings: [], nodes: mockGraph, passages: [], edges: [{ id: "fixture-edge", source: "teaching-0", target: "teaching-2304", relation: "explains", confidence: "EXTRACTED" as const, score: 1, sourceIds: [realWorkspace.sources[0].id] }] };
     await context.route("**/api/knowledge/nodes?**", route => {
       const url = new URL(route.request().url());
       return fulfill(route, searchKnowledgeNodes(graphCorpus, url.searchParams.get("q") || "", Number(url.searchParams.get("offset") || 0), 50));
