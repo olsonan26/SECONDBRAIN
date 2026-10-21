@@ -43,6 +43,11 @@ export interface GraphNode {
   sourceIds: string[];
   description: string;
   degree: number;
+  knowledgeKind?: string;
+  aliases?: string[];
+  applicationTags?: string[];
+  evidence?: KnowledgeEvidence[];
+  extractionJobId?: string;
 }
 export interface GraphEdge {
   id: string;
@@ -52,6 +57,56 @@ export interface GraphEdge {
   confidence: Confidence;
   score: number;
   sourceIds: string[];
+  evidence?: KnowledgeEvidence[];
+  extractionJobId?: string;
+}
+
+export interface KnowledgeEvidence {
+  passageId: string;
+  sourceId: string;
+  page: number | null;
+  quote: string;
+}
+export interface KnowledgePassageAudit {
+  passageId: string;
+  sourceId: string;
+  page: number | null;
+  disposition: "pending" | "extracted" | "excluded-story" | "excluded-noise" | "unresolved";
+  reason: string;
+  nodeIds: string[];
+}
+export type KnowledgeStage = "queued" | "running" | "paused" | "paused-budget" | "complete" | "needs-review" | "failed";
+export interface KnowledgeJobSummary {
+  id: string;
+  sourceIds: string[];
+  author: string;
+  createdAt: string;
+  updatedAt: string;
+  stage: KnowledgeStage;
+  provider: Settings["provider"];
+  model: string;
+  totalPassages: number;
+  processedPassages: number;
+  pendingCount: number;
+  reviewedPassages: number;
+  extractedPassages?: number;
+  excludedPassages: number;
+  unresolvedPassages: number;
+  nodesAdded: number;
+  edgesAdded: number;
+  costUsd: number;
+  measuredCostUsd: number;
+  estimatedCostUsd: number;
+  estimatedTotalCostUsd?: number;
+  budgetUsd: number;
+  reservedUsd: number;
+  inputTokens: number;
+  outputTokens: number;
+  requirementsCount: number;
+  currentPhase?: "extract" | "review";
+  error?: string;
+  warnings: string[];
+  coverage?: { question: string; status: "candidate" | "not-found" | "pending"; nodeIds: string[] }[];
 }
 export interface Corpus {
   version: number;
@@ -62,6 +117,10 @@ export interface Corpus {
   nodes: GraphNode[];
   edges: GraphEdge[];
   warnings: string[];
+  knowledgeCommits?: Record<string, {
+    nodes: number; edges: number; audits?: KnowledgePassageAudit[]; warnings?: string[];
+    usage?: { token: string; cost: number; measuredCost: number; inputTokens: number; outputTokens: number; measured: boolean };
+  }>;
 }
 export interface Citation extends Passage { number: number; score: number; }
 export interface Answer {
@@ -107,6 +166,7 @@ export interface Settings {
   writingInstructions: string;
 }
 export interface Workspace {
+  graphOverviewOnly?: boolean;
   brain: Brain;
   brains: Brain[];
   user: { name: string; role: "owner" | "member" };

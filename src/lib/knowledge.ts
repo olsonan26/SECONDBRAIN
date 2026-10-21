@@ -1,0 +1,333 @@
+import "server-only";
+import { createHash, randomUUID } from "node:crypto";
+import type { Corpus, KnowledgeJobSummary, KnowledgeStage, Passage, Settings } from "./types";
+import { HttpError } from "./auth";
+import { brainKey } from "./brain-scope";
+import { requireBrain } from "./brains";
+import { getCorpus, invalidateCorpus } from "./corpus";
+import { getSettings } from "./model";
+import { modelConnection, modelError } from "./model-provider";
+import { listRecords, readRecord, updateRecord } from "./storage";
+import { applicationInstructions, extractionSchema, extractionShape, finalVerificationInstructions, finalVerificationSchema, independentlyVerifiedFragment, knowledgeInstructions, reviewSchema, reviewShape, type Extraction, type KnowledgeReview, type PassageAudit } from "./knowledge-schema";
+
+const LEASE_MS = 110_000;
+const MAX_COMPLETION_TOKENS = 12_000;
+const MAX_ATTEMPTS = 3;
+const MAX_WORKERS = 3;
+const INPUT_RATE = 0.35 / 1_000_000;
+const OUTPUT_RATE = 1.4 / 1_000_000;
+const BATCH_SIZE = 6;
+type Phase = "extract" | "review" | "verify";
+type Batch = {
+  id: string; passageIds: string[]; phase: Phase; state: "pending" | "leased" | "done" | "failed";
+  attempts: number; revision: number; lease?: { token: string; expiresAt: number; reservation: number };
+  candidate?: Extraction; review?: KnowledgeReview; error?: string;
+};
+interface KnowledgeJob {
+  version: 1; id: string; brainId: string; sourceIds: string[]; author: string;
+  createdAt: string; updatedAt: string; stage: KnowledgeStage; provider: Settings["provider"]; model: string;
+  requirements: string; budgetUsd: number; costUsd: number; measuredCostUsd: number; estimatedCostUsd: number; estimatedTotalCostUsd: number;
+  inputTokens: number; outputTokens: number; nodesAdded: number; edgesAdded: number;
+  accountedCalls: string[];
+  passages: PassageAudit[]; passageHashes: Record<string, string>; batches: Batch[];
+  warnings: string[]; error?: string;
+}
+type SourceRegistry = { sources: Record<string, string>; creating: Record<string, KnowledgeJob> };
+
+const round = (value: number) => Math.round(value * 1e8) / 1e8;
+const stamp = () => new Date().toISOString();
+const hash = (value: string) => createHash("sha256").update(value).digest("hex");
+function jobKey(brainId: string, id: string) {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)) throw new HttpError(400, "Invalid knowledge extraction job ID.");
+  return brainKey(brainId, `knowledge/jobs/${id}.json`);
+}
+function summary(job: KnowledgeJob): KnowledgeJobSummary {
+  const processed = job.passages.filter(p => p.disposition !== "pending");
+  return { id: job.id, sourceIds: job.sourceIds, author: job.author, createdAt: job.createdAt, updatedAt: job.updatedAt,
+    stage: job.stage, provider: job.provider, model: job.model, totalPassages: job.passages.length,
+    processedPassages: processed.length, pendingCount: job.passages.length - processed.length,
+    reviewedPassages: job.batches.filter(b => b.state === "done").reduce((n, b) => n + b.passageIds.length, 0),
+    extractedPassages: job.batches.filter(b => b.phase !== "extract" || b.state === "done").reduce((n, b) => n + b.passageIds.length, 0),
+    excludedPassages: processed.filter(p => p.disposition.startsWith("excluded")).length,
+    unresolvedPassages: processed.filter(p => p.disposition === "unresolved").length,
+    nodesAdded: job.nodesAdded, edgesAdded: job.edgesAdded, costUsd: job.costUsd,
+    measuredCostUsd: job.measuredCostUsd, estimatedCostUsd: job.estimatedCostUsd, estimatedTotalCostUsd: job.estimatedTotalCostUsd, budgetUsd: job.budgetUsd,
+    reservedUsd: round(job.batches.reduce((total, b) => total + (b.lease?.reservation ?? 0), 0)),
+    inputTokens: job.inputTokens, outputTokens: job.outputTokens,
+    requirementsCount: job.requirements.split(/\r?\n/).filter(line => line.trim()).length,
+    currentPhase: (job.batches.find(b => b.state === "leased")?.phase ?? job.batches.find(b => b.state === "pending")?.phase) === "extract" ? "extract" : "review",
+    error: job.error, warnings: job.warnings };
+}
+async function readJob(id: string, brainId: string) {
+  let job = (await readRecord<KnowledgeJob>(jobKey(brainId, id)))?.value;
+  if (!job) {
+    const snapshot = (await readRecord<SourceRegistry>(brainKey(brainId, "knowledge/source-claims.json")))?.value.creating[id];
+    if (snapshot?.brainId === brainId) job = await updateRecord(jobKey(brainId, id), snapshot, old => old);
+  }
+  if (!job || job.brainId !== brainId) throw new HttpError(404, "This knowledge extraction job is not in the selected brain.");
+  return job;
+}
+async function recoverCreatingJobs(brainId: string) {
+  const key = brainKey(brainId, "knowledge/source-claims.json");
+  const registry = (await readRecord<SourceRegistry>(key))?.value;
+  if (!registry || !Object.keys(registry.creating).length) return;
+  const recovered: string[] = [];
+  for (const snapshot of Object.values(registry.creating)) if (snapshot.brainId === brainId) {
+    await updateRecord(jobKey(brainId, snapshot.id), snapshot, old => old); recovered.push(snapshot.id);
+  }
+  await updateRecord(key, registry, current => { for (const id of recovered) delete current.creating[id]; return current; });
+}
+function addWarning(job: KnowledgeJob, message: string) { job.warnings = [...new Set([...job.warnings, message])].slice(-70); }
+function updateStage(job: KnowledgeJob) {
+  if (["paused", "paused-budget", "failed"].includes(job.stage)) return;
+  if (job.batches.some(b => b.state === "leased" || b.state === "pending")) job.stage = "running";
+  else if (job.batches.some(b => b.state === "failed") || job.passages.some(p => p.disposition === "unresolved")) job.stage = "needs-review";
+  else job.stage = "complete";
+}
+function releaseExpired(job: KnowledgeJob) {
+  for (const batch of job.batches) if (batch.lease && batch.lease.expiresAt <= Date.now()) {
+    // A terminated request may already have been billed. Never free unknown spend for another call.
+    applyAccounting(job, batch.lease.token, { cost: batch.lease.reservation, measuredCost: 0, inputTokens: 0, outputTokens: 0, measured: false });
+    addWarning(job, "An interrupted model call had unknown billing. Its full reserved maximum was charged to the safety budget; actual provider spend may be lower.");
+    batch.lease = undefined;
+    batch.state = batch.attempts >= MAX_ATTEMPTS ? "failed" : "pending";
+    batch.error = "The previous extraction request was interrupted. Its result was not accepted.";
+  }
+}
+export const MAX_KNOWLEDGE_BUDGET_USD = 10;
+function validateBudget(value: number) { if (!Number.isFinite(value) || value < 0.01 || value > MAX_KNOWLEDGE_BUDGET_USD) throw new HttpError(400, "Choose an extraction spending cap between $0.01 and $10. A higher limit has not been authorized."); }
+
+export async function listKnowledgeJobs(brainId: string) {
+  await requireBrain(brainId);
+  await recoverCreatingJobs(brainId);
+  const jobs = await listRecords<KnowledgeJob>(brainKey(brainId, "knowledge/jobs"));
+  return jobs.filter(j => j.brainId === brainId).sort((a, b) => b.createdAt.localeCompare(a.createdAt)).map(summary);
+}
+export async function getKnowledgeJob(id: string, brainId: string) {
+  const job = await readJob(id, brainId);
+  return { ...summary(job), requirements: job.requirements, passageAudit: job.passages,
+    batches: job.batches.map(({ id, passageIds, phase, state, attempts, error }) => ({ id, passageIds, phase, state, attempts, error })) };
+}
+export async function createKnowledgeJob(input: { sourceIds: string[]; requirements?: string; budgetUsd?: number }, brainId: string, author: string) {
+  await requireBrain(brainId);
+  const budgetUsd = input.budgetUsd ?? 3; validateBudget(budgetUsd);
+  if (!Array.isArray(input.sourceIds) || !input.sourceIds.length || input.sourceIds.length > 20 || input.sourceIds.some(id => typeof id !== "string")) throw new HttpError(400, "Choose one or more source documents in this brain.");
+  const requirements = input.requirements?.trim() ?? "";
+  if (requirements.length > 60_000) throw new HttpError(400, "The coverage wish list is limited to 60,000 characters.");
+  const corpus = await getCorpus(brainId), settings = await getSettings();
+  if (!settings.apiKey) throw new HttpError(422, "Connect the model in Settings before starting AI knowledge extraction.");
+  if (settings.provider !== "openrouter") throw new HttpError(422, "Budget-capped extraction currently requires your OpenRouter connection. Select OpenRouter in Settings.");
+  const sourceIds = [...new Set(input.sourceIds)];
+  if (sourceIds.some(id => !corpus.sources.some(s => s.id === id))) throw new HttpError(404, "A selected source is not in this brain.");
+  const passages = corpus.passages.filter(p => sourceIds.includes(p.sourceId));
+  if (!passages.length) throw new HttpError(422, "The selected sources have no searchable text passages.");
+  const existing = await listKnowledgeJobs(brainId);
+  if (existing.some(j => j.stage !== "complete" && j.sourceIds.some(id => sourceIds.includes(id)))) throw new HttpError(409, "An extraction job already exists for this source. Resume that job to keep its progress and spending cap.");
+  const id = randomUUID(), now = stamp();
+  const batches: Batch[] = [];
+  for (let offset = 0; offset < passages.length; offset += BATCH_SIZE) batches.push({ id: `${offset / BATCH_SIZE}`, passageIds: passages.slice(offset, offset + BATCH_SIZE).map(p => p.id), phase: "extract", state: "pending", attempts: 0, revision: 0 });
+  const inputEstimate = passages.reduce((n, p) => n + p.text.length, 0) / 3;
+  const estimatedTotalCostUsd = round(inputEstimate * INPUT_RATE * 4 + batches.length * MAX_COMPLETION_TOKENS * OUTPUT_RATE * 2);
+  const job: KnowledgeJob = { version: 1, id, brainId, sourceIds, author, createdAt: now, updatedAt: now, stage: "queued", provider: settings.provider, model: settings.model,
+    requirements, budgetUsd, costUsd: 0, measuredCostUsd: 0, estimatedCostUsd: 0, estimatedTotalCostUsd, inputTokens: 0, outputTokens: 0, nodesAdded: 0, edgesAdded: 0, accountedCalls: [],
+    passages: passages.map(p => ({ passageId: p.id, sourceId: p.sourceId, page: p.page, disposition: "pending", reason: "Not yet independently reviewed.", nodeIds: [] })),
+    passageHashes: Object.fromEntries(passages.map(p => [p.id, hash(p.text)])), batches,
+    warnings: ["Text-only extraction cannot read unextracted chart drawings or image-only tables. Such passages remain unresolved until the visual material is supplied.", "Processing every passage and performing omission reviews does not guarantee that AI found every possible teaching. Exact evidence and a coverage audit are retained.", "Spending includes measured provider cost when returned, otherwise conservative token-based or full-call reservation accounting. The cap is checked before every model call."] };
+  // All selected sources are claimed in one compare-and-swap. Two tabs cannot
+  // create independent spending caps for the same book at the same time.
+  const complete = new Set(existing.filter(j => j.stage === "complete").map(j => j.id));
+  const registryKey = brainKey(brainId, "knowledge/source-claims.json");
+  const registry = await updateRecord<SourceRegistry>(registryKey, { sources: {}, creating: {} }, current => {
+    if (sourceIds.some(sourceId => current.sources[sourceId] && !complete.has(current.sources[sourceId]))) throw new HttpError(409, "An extraction job already exists for this source. Resume it to preserve its progress and spending cap.");
+    for (const sourceId of sourceIds) current.sources[sourceId] = id;
+    current.creating[id] = job;
+    return current;
+  });
+  await updateRecord(jobKey(brainId, id), job, old => old);
+  // Keep the recovery snapshot if clearing it fails; list/get can repair an
+  // interrupted creation without generating another job or another budget.
+  await updateRecord(registryKey, registry, current => { delete current.creating[id]; return current; }).catch(() => {});
+  return summary(job);
+}
+
+export async function pauseKnowledgeJob(id: string, brainId: string) {
+  const initial = await readJob(id, brainId);
+  return summary(await updateRecord(jobKey(brainId, id), initial, job => { if (!["complete", "needs-review"].includes(job.stage)) job.stage = "paused"; job.updatedAt = stamp(); return job; }));
+}
+export async function resumeKnowledgeJob(id: string, brainId: string, input: { budgetUsd?: number } = {}) {
+  if (input.budgetUsd !== undefined) validateBudget(input.budgetUsd);
+  const initial = await readJob(id, brainId);
+  return summary(await updateRecord(jobKey(brainId, id), initial, job => {
+    releaseExpired(job);
+    if (input.budgetUsd !== undefined) {
+      if (input.budgetUsd < job.costUsd + job.batches.reduce((n, b) => n + (b.lease?.reservation ?? 0), 0)) throw new HttpError(400, "The cap cannot be lower than already spent and reserved usage.");
+      job.budgetUsd = input.budgetUsd;
+    }
+    for (const batch of job.batches) if (batch.state === "failed") {
+      batch.state = "pending"; batch.attempts = 0; batch.error = undefined;
+      for (const audit of job.passages) if (batch.passageIds.includes(audit.passageId)) { audit.disposition = "pending"; audit.reason = "Resuming a previously failed bounded request."; }
+    }
+    for (const batch of job.batches) if (batch.state === "done" && batch.passageIds.some(p => job.passages.some(a => a.passageId === p && a.disposition === "unresolved"))) {
+      batch.state = "pending"; batch.phase = "extract"; batch.attempts = 0; batch.revision += 1; batch.candidate = undefined; batch.review = undefined;
+      for (const audit of job.passages) if (batch.passageIds.includes(audit.passageId) && audit.disposition === "unresolved") { audit.disposition = "pending"; audit.reason = "Requeued for explicit follow-up review."; }
+    }
+    job.stage = "running"; job.error = undefined; job.updatedAt = stamp(); updateStage(job); return job;
+  }));
+}
+
+function promptFor(job: KnowledgeJob, batch: Batch, passages: Passage[], corpus: Corpus) {
+  const contextIds = new Set(batch.passageIds);
+  const boundary: Passage[] = [];
+  for (const passage of passages) {
+    const index = corpus.passages.findIndex(p => p.id === passage.id);
+    for (const neighbour of [corpus.passages[index - 1], corpus.passages[index + 1]]) if (neighbour && neighbour.sourceId === passage.sourceId && !contextIds.has(neighbour.id) && !boundary.some(p => p.id === neighbour.id)) boundary.push(neighbour);
+  }
+  // Full wish list is preserved privately. Prompt only likely relevant lines; it is never source authority.
+  const vocabulary = new Set(passages.flatMap(p => p.text.toLowerCase().match(/[\p{L}\p{N}']{4,}/gu) ?? []));
+  const lines = job.requirements.split(/\r?\n/).map(text => ({ text, score: (text.toLowerCase().match(/[\p{L}\p{N}']{4,}/gu) ?? []).reduce((n, term) => n + Number(vocabulary.has(term)), 0) })).filter(v => v.score > 0).sort((a, b) => b.score - a.score);
+  const requirements = lines.slice(0, 24).map(v => v.text).join("\n").slice(0, 6000);
+  return [
+    { role: "system", content: `${knowledgeInstructions}\n${applicationInstructions}\n${batch.phase === "extract" ? extractionShape : batch.phase === "review" ? reviewShape : finalVerificationInstructions}` },
+    { role: "user", content: JSON.stringify({ sourcePolicy: "Extract all teachings whether or not a wish-list question mentions them. Boundary context may clarify meaning but cite ONLY the supplied target passages, which are the ones audited in this batch.", coverageWishListNotEvidence: requirements,
+      targetPassages: passages.map(p => ({ id: p.id, sourceId: p.sourceId, page: p.page, section: p.section, text: p.text })),
+      boundaryContextNotTarget: boundary.map(p => ({ page: p.page, text: p.text.slice(0, 2200) })),
+      ...(batch.phase === "review" ? { candidate: batch.candidate } : batch.phase === "verify" ? { proposedTeachings: [...(batch.candidate?.teachings ?? []), ...(batch.review?.additions ?? [])], proposedRelationships: batch.review?.relationships ?? [], proposedPassages: batch.review?.passages ?? [] } : {}) }) },
+  ];
+}
+function reserveFor(messages: { role: string; content: string }[]) {
+  // UTF-8 bytes bound input token count more conservatively than character/4 guesses.
+  const promptUpperTokens = Buffer.byteLength(JSON.stringify(messages), "utf8") + 1000;
+  return round((promptUpperTokens * INPUT_RATE + MAX_COMPLETION_TOKENS * OUTPUT_RATE) * 1.05);
+}
+type Usage = { cost?: number; prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+function accountedUsage(usage: Usage | undefined, reservation: number) {
+  const validInput = typeof usage?.prompt_tokens === "number" && Number.isFinite(usage.prompt_tokens) && usage.prompt_tokens >= 0;
+  const validOutput = typeof usage?.completion_tokens === "number" && Number.isFinite(usage.completion_tokens) && usage.completion_tokens >= 0;
+  const inputTokens = validInput ? usage!.prompt_tokens! : 0;
+  const outputTokens = validOutput ? usage!.completion_tokens! : 0;
+  const measured = typeof usage?.cost === "number" && Number.isFinite(usage.cost) && usage.cost >= 0;
+  const cost = measured ? usage!.cost! : validInput && validOutput ? inputTokens * INPUT_RATE + outputTokens * OUTPUT_RATE : reservation;
+  return { cost: round(cost), measuredCost: measured ? round(cost) : 0, inputTokens, outputTokens, measured };
+}
+function applyAccounting(job: KnowledgeJob, token: string, usage: ReturnType<typeof accountedUsage>) {
+  if (job.accountedCalls.includes(token)) return;
+  job.accountedCalls.push(token);
+  job.costUsd = round(job.costUsd + usage.cost); job.measuredCostUsd = round(job.measuredCostUsd + usage.measuredCost);
+  if (!usage.measured) job.estimatedCostUsd = round(job.estimatedCostUsd + usage.cost);
+  job.inputTokens += usage.inputTokens; job.outputTokens += usage.outputTokens;
+}
+type Fragment = ReturnType<typeof independentlyVerifiedFragment>;
+type Receipt = NonNullable<Corpus["knowledgeCommits"]>[string];
+function replayReceipts(job: KnowledgeJob, corpus: Corpus) {
+  for (const batch of job.batches) {
+    if (batch.state === "done") continue;
+    const receipt = corpus.knowledgeCommits?.[`${job.id}-${batch.id}-${batch.revision}`];
+    if (!receipt?.audits || !receipt.usage) continue;
+    applyAccounting(job, receipt.usage.token, receipt.usage);
+    for (const audit of receipt.audits) { const index = job.passages.findIndex(p => p.passageId === audit.passageId); if (index >= 0) job.passages[index] = audit; }
+    job.nodesAdded += receipt.nodes; job.edgesAdded += receipt.edges;
+    for (const warning of receipt.warnings ?? []) addWarning(job, warning);
+    batch.state = "done"; batch.lease = undefined; batch.candidate = undefined; batch.review = undefined; batch.error = undefined;
+  }
+}
+
+async function appendFragment(brainId: string, job: KnowledgeJob, batch: Batch, fragment: Fragment, usage: ReturnType<typeof accountedUsage> & { token: string }) {
+  const receipt = `${job.id}-${batch.id}-${batch.revision}`;
+  const initial = await getCorpus(brainId);
+  const updated = await updateRecord<Corpus>(brainKey(brainId, "corpus.json"), initial, corpus => {
+    if (corpus.knowledgeCommits?.[receipt]) return corpus;
+    const currentNodes = new Set(corpus.nodes.map(n => n.id)), currentEdges = new Set(corpus.edges.map(e => e.id));
+    const nodes = fragment.nodes.filter(n => !currentNodes.has(n.id));
+    const edges = fragment.edges.filter(e => !currentEdges.has(e.id));
+    const sourceNodes = [...new Set(fragment.nodes.flatMap(n => n.sourceIds))].filter(id => !currentNodes.has(`source:${id}`)).flatMap(id => {
+      const source = corpus.sources.find(s => s.id === id);
+      return source ? [{ id: `source:${id}`, label: source.title, type: "document", layer: source.layer, community: "Your uploads", sourceIds: [id], description: "Source document with independently reviewed teaching nodes.", degree: 0 }] : [];
+    });
+    const allEdges = [...corpus.edges, ...edges], degrees = new Map<string, number>();
+    for (const edge of allEdges) { degrees.set(edge.source, (degrees.get(edge.source) ?? 0) + 1); degrees.set(edge.target, (degrees.get(edge.target) ?? 0) + 1); }
+    return { ...corpus, importedAt: stamp(), nodes: [...corpus.nodes, ...sourceNodes, ...nodes].map(n => ({ ...n, degree: degrees.get(n.id) ?? 0 })), edges: allEdges,
+      knowledgeCommits: { ...corpus.knowledgeCommits, [receipt]: { nodes: nodes.length, edges: edges.length, audits: fragment.audits, warnings: fragment.warnings, usage } } };
+  });
+  invalidateCorpus(brainId);
+  return updated.knowledgeCommits![receipt];
+}
+
+export async function stepKnowledgeJob(id: string, brainId: string) {
+  const initial = await readJob(id, brainId), corpus = (await readRecord<Corpus>(brainKey(brainId, "corpus.json")))?.value ?? await getCorpus(brainId), settings = await getSettings();
+  if (!settings.apiKey || settings.provider !== initial.provider || settings.model !== initial.model) throw new HttpError(422, "The model connection changed. Restore this job's provider and model in Settings before resuming; its writing instructions were not changed.");
+  const token = randomUUID();
+  let claimedId: string | undefined;
+  const claimed = await updateRecord(jobKey(brainId, id), initial, job => {
+    claimedId = undefined;
+    replayReceipts(job, corpus);
+    releaseExpired(job);
+    if (!["queued", "running"].includes(job.stage)) return job;
+    if (job.batches.filter(b => b.state === "leased").length >= MAX_WORKERS) return job;
+    const batch = job.batches.find(b => b.state === "pending" && b.phase === "verify") ?? job.batches.find(b => b.state === "pending" && b.phase === "review") ?? job.batches.find(b => b.state === "pending");
+    if (!batch) { updateStage(job); return job; }
+    const passages = batch.passageIds.map(id => corpus.passages.find(p => p.id === id));
+    if (passages.some((p, index) => !p || hash(p.text) !== job.passageHashes[batch.passageIds[index]])) throw new HttpError(409, "A source passage changed or disappeared. Start a new extraction from the current document.");
+    const reservation = reserveFor(promptFor(job, batch, passages as Passage[], corpus));
+    const outstanding = job.batches.reduce((n, b) => n + (b.lease?.reservation ?? 0), 0);
+    if (job.costUsd + outstanding + reservation > job.budgetUsd) { job.stage = "paused-budget"; job.error = "The remaining safety budget cannot reserve another bounded model call. Progress is saved. Raise the cap explicitly to continue."; job.updatedAt = stamp(); return job; }
+    batch.lease = { token, expiresAt: Date.now() + LEASE_MS, reservation }; batch.state = "leased"; batch.attempts += 1; claimedId = batch.id;
+    job.stage = "running"; job.updatedAt = stamp(); job.error = undefined; return job;
+  });
+  if (!claimedId) return summary(claimed);
+  const batch = claimed.batches.find(b => b.id === claimedId)!;
+  const passages = batch.passageIds.map(id => corpus.passages.find(p => p.id === id)!);
+  const connection = modelConnection(settings);
+  let usage: Usage | undefined, resultAccepted = false, failure = "", fatalStatus = 0;
+  let extracted: Extraction | undefined;
+  let reviewedCandidate: KnowledgeReview | undefined;
+  let reviewed: Fragment | undefined;
+  let receipt: Receipt | undefined;
+  try {
+    const response = await fetch(connection.url, { method: "POST", headers: connection.headers, signal: AbortSignal.timeout(65_000),
+      body: JSON.stringify({ model: settings.model, temperature: 0, max_tokens: MAX_COMPLETION_TOKENS, ...connection.options,
+        provider: { max_price: { prompt: 0.35, completion: 1.4, request: 0 }, sort: "throughput" }, usage: { include: true }, response_format: { type: "json_object" }, messages: promptFor(claimed, batch, passages, corpus) }) });
+    if (!response.ok) { if ([400, 401, 402, 403, 404, 429].includes(response.status)) fatalStatus = response.status; throw new Error(modelError(connection.label, response.status)); }
+    const result = await response.json(); usage = result.usage;
+    if (result.error) { const status = Number(result.error.code) || 502; if ([400, 401, 402, 403, 404, 429].includes(status)) fatalStatus = status; throw new Error(modelError(connection.label, status)); }
+    if (result.choices?.[0]?.finish_reason !== "stop") throw new Error("The model response was truncated or did not finish normally. No partial knowledge was accepted.");
+    const parsed = JSON.parse(result.choices?.[0]?.message?.content ?? "");
+    if (batch.phase === "extract") extracted = extractionSchema.parse(parsed);
+    else if (batch.phase === "review") reviewedCandidate = reviewSchema.parse(parsed);
+    else {
+      if (!batch.candidate) throw new Error("The extraction candidate was not saved; retry this batch.");
+      if (!batch.review) throw new Error("The omission review was not saved; retry this batch.");
+      reviewed = independentlyVerifiedFragment(batch.candidate, batch.review, finalVerificationSchema.parse(parsed), passages, id, corpus);
+      const current = await readJob(id, brainId);
+      if (current.batches.find(b => b.id === batch.id)?.lease?.token !== token) throw new Error("This request lost its lease. No unowned result was saved.");
+      receipt = await appendFragment(brainId, claimed, batch, reviewed, { ...accountedUsage(usage, batch.lease!.reservation), token });
+    }
+    resultAccepted = true;
+  } catch (error) {
+    failure = error instanceof Error && error.name === "ZodError" ? "The model returned invalid extraction data. No partial result was accepted." : error instanceof SyntaxError ? "The model returned malformed JSON. No partial result was accepted." : error instanceof Error && ["TimeoutError", "AbortError"].includes(error.name) ? "The model timed out; this bounded call may have been billed. Progress is saved and the batch can retry." : error instanceof Error ? error.message.slice(0, 500) : "The extraction request failed.";
+    failure = failure.replace(/Bearer\s+\S+|sk-(?:or-)?[\w-]+/gi, "[redacted]");
+  }
+  const accounted = accountedUsage(usage, batch.lease!.reservation);
+  const final = await updateRecord(jobKey(brainId, id), claimed, job => {
+    const currentBatch = job.batches.find(b => b.id === batch.id)!;
+    if (currentBatch.lease?.token !== token) return job;
+    applyAccounting(job, token, accounted);
+    if (!accounted.measured) addWarning(job, "At least one call did not return a measured dollar cost. Safety spend includes conservative accounting rather than claiming exact provider billing.");
+    currentBatch.lease = undefined;
+    if (resultAccepted && extracted) { currentBatch.candidate = extracted; currentBatch.phase = "review"; currentBatch.state = "pending"; currentBatch.attempts = 0; currentBatch.error = undefined; }
+    else if (resultAccepted && reviewedCandidate) { currentBatch.review = reviewedCandidate; currentBatch.phase = "verify"; currentBatch.state = "pending"; currentBatch.attempts = 0; currentBatch.error = undefined; }
+    else if (resultAccepted && reviewed && receipt) {
+      currentBatch.state = "done"; currentBatch.error = undefined; currentBatch.candidate = undefined; currentBatch.review = undefined;
+      for (const audit of receipt.audits ?? []) { const offset = job.passages.findIndex(p => p.passageId === audit.passageId); if (offset >= 0) job.passages[offset] = audit; }
+      job.nodesAdded += receipt.nodes; job.edgesAdded += receipt.edges;
+      for (const warning of receipt.warnings ?? []) addWarning(job, warning);
+    } else {
+      currentBatch.error = failure; currentBatch.state = fatalStatus && fatalStatus !== 429 || currentBatch.attempts >= MAX_ATTEMPTS ? "failed" : "pending"; job.error = failure;
+      if (currentBatch.state === "failed") for (const audit of job.passages) if (currentBatch.passageIds.includes(audit.passageId)) { audit.disposition = "unresolved"; audit.reason = `Repeated ${currentBatch.phase} failure: ${failure}`; }
+      if (fatalStatus) job.stage = fatalStatus === 429 ? "paused" : "failed";
+    }
+    if (job.costUsd > job.budgetUsd) { job.stage = "paused-budget"; job.error = "Reported provider usage exceeded its conservative reservation. Extraction stopped; no further calls will be made."; }
+    else updateStage(job);
+    job.updatedAt = stamp(); return job;
+  });
+  return summary(final);
+}

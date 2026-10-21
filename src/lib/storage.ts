@@ -9,6 +9,19 @@ const localRoot = () => path.join(process.cwd(), "private");
 export const isCloud = () => Boolean(process.env.BLOB_READ_WRITE_TOKEN || process.env.BLOB_STORE_ID);
 const queue = new Map<string, Promise<unknown>>();
 
+async function renameAtomic(source: string, target: string) {
+  // Windows can briefly deny replacement while another request is reading the
+  // JSON file. Retry the same atomic rename; never unlink the live destination.
+  for (let attempt = 0; ; attempt++) {
+    try { await fs.rename(source, target); return; }
+    catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (attempt >= 6 || !["EPERM", "EBUSY", "EACCES"].includes(code ?? "")) throw error;
+      await new Promise(resolve => setTimeout(resolve, Math.min(160, 10 * 2 ** attempt)));
+    }
+  }
+}
+
 function safeKey(key: string) {
   if (!/^[a-zA-Z0-9_./-]+$/.test(key) || key.includes("..")) throw new Error("Invalid storage key");
   return `secondbrain/${key}`;
@@ -47,8 +60,13 @@ export async function writeRecord<T>(key: string, value: T, expectedEtag?: strin
     if ((current?.etag ?? null) !== expectedEtag) throw new ConflictError("This item changed. Reload it before saving.");
   }
   const tmp = `${target}.${randomUUID()}.tmp`;
-  await fs.writeFile(tmp, text, { mode: 0o600 });
-  await fs.rename(tmp, target);
+  try {
+    await fs.writeFile(tmp, text, { mode: 0o600 });
+    await renameAtomic(tmp, target);
+  } catch (error) {
+    await fs.unlink(tmp).catch(() => {});
+    throw error;
+  }
 }
 
 export class ConflictError extends Error {}

@@ -9,11 +9,15 @@ import { HttpError } from "./auth";
 import { presentDraft } from "./article-presentation";
 import { brainKey, MAIN_BRAIN_ID } from "./brain-scope";
 import { listBrains, requireBrain } from "./brains";
+import { getQuestionProfile } from "./knowledge-question-profile";
+import { findQuestionTags } from "./knowledge-questions";
+import { retrieveWithKnowledge } from "./knowledge-retrieval";
+import { knowledgeOverview } from "./knowledge-graph";
 
 export async function workspace(user: Workspace["user"], brainId = MAIN_BRAIN_ID): Promise<Workspace> {
   const brain = await requireBrain(brainId);
   const [corpus, settings, drafts, runs, brains] = await Promise.all([getCorpus(brainId), getSettings(), listRecords<Draft>(brainKey(brainId, "drafts")), listRecords<Run>(brainKey(brainId, "runs")), listBrains()]);
-  return { user, brain, brains, sources: corpus.sources.map(({ content, ...source }) => source), nodes: corpus.nodes, edges: corpus.edges,
+  return { user, brain, brains, sources: corpus.sources.map(({ content, ...source }) => source), ...knowledgeOverview(corpus),
     stats: { sources: corpus.sources.length, passages: corpus.passages.length, nodes: corpus.nodes.length, edges: corpus.edges.length,
       characters: corpus.sources.reduce((n, s) => n + s.characters, 0), pages: corpus.sources.reduce((n, s) => n + s.pages, 0) },
     settings: publicSettings(settings), drafts: drafts.map(presentDraft).sort((a,b) => b.updatedAt.localeCompare(a.updatedAt)), runs: runs.sort((a,b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 50),
@@ -22,7 +26,8 @@ export async function workspace(user: Workspace["user"], brainId = MAIN_BRAIN_ID
 
 export async function ask(question: string, sourceIds: string[] = [], brainId = MAIN_BRAIN_ID): Promise<Answer> {
   const [corpus, settings] = await Promise.all([getCorpus(brainId), getSettings()]);
-  const citations = retrieve(corpus, question, sourceIds);
+  const profile = await getQuestionProfile(brainId);
+  const citations = retrieveWithKnowledge(corpus, question, sourceIds, findQuestionTags(question, profile?.entries ?? []));
   const result: Answer = { id: randomUUID(), question, text: "", mode: citations.length ? "extractive" : "not-found", citations,
     contextTokens: Math.ceil(citations.reduce((n,c) => n+c.text.length, 0) / 4), corpusTokens: Math.ceil(corpus.sources.reduce((n,s) => n+s.characters,0)/4),
     model: null, warnings: [], createdAt: new Date().toISOString() };
@@ -45,7 +50,8 @@ export async function ask(question: string, sourceIds: string[] = [], brainId = 
 
 export async function createDraft(brief: string, title: string | undefined, sourceIds: string[], author: string, brainId = MAIN_BRAIN_ID): Promise<Draft> {
   const [corpus, settings] = await Promise.all([getCorpus(brainId), getSettings()]);
-  const citations = retrieve(corpus, brief, sourceIds, 10);
+  const profile = await getQuestionProfile(brainId);
+  const citations = retrieveWithKnowledge(corpus, brief, sourceIds, findQuestionTags(brief, profile?.entries ?? []), 10);
   if (!citations.length) throw new HttpError(422, "No supporting passages were found for this brief. Add a specific topic or choose relevant sources first.");
   let text = `# ${title || brief}\n\n## Editorial brief\n\n${brief}\n\n## Evidence to build on\n\n${extractiveText(citations)}\n\n## Suggested structure\n\n- Introduce the question using the source evidence.\n- Develop the central ideas, with citations for each factual paragraph.\n- Explain connections while distinguishing source statements from interpretation.\n- Close with what the sources support and the questions they leave open.\n\n*Evidence outline: connect a model to generate article prose, then review it before publication.*`;
   let mode: Draft["mode"] = "extractive", actualTitle = title || brief;

@@ -8,6 +8,9 @@ import { updateRecord, readOriginal, ConflictError } from "@/lib/storage";
 import type { Draft } from "@/lib/types";
 import { listBrains, createBrain, requireBrain } from "@/lib/brains";
 import { brainKey, MAIN_BRAIN_ID } from "@/lib/brain-scope";
+import { createKnowledgeJob, listKnowledgeJobs, getKnowledgeJob, stepKnowledgeJob, pauseKnowledgeJob, resumeKnowledgeJob } from "@/lib/knowledge";
+import { getQuestionCoverage, saveQuestionProfile } from "@/lib/knowledge-question-profile";
+import { knowledgeNodeDetail, searchKnowledgeNodes } from "@/lib/knowledge-graph";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -40,6 +43,45 @@ async function handle(request: Request, context: Context) {
     if (brainParams.getAll("brain").length > 1) throw new HttpError(400, "Choose one active brain per request.");
     const brainId = brainParams.get("brain") ?? MAIN_BRAIN_ID;
     await requireBrain(brainId);
+    if (route === "knowledge/nodes" && request.method === "GET") {
+      const input = z.object({ q: z.string().max(300).default(""), offset: z.coerce.number().int().min(0).max(1_000_000).default(0), limit: z.coerce.number().int().min(1).max(100).default(50) }).parse(Object.fromEntries(brainParams));
+      return json(searchKnowledgeNodes(await getCorpus(brainId), input.q, input.offset, input.limit));
+    }
+    if (route === "knowledge/node" && request.method === "GET") {
+      const id = z.string().min(1).max(200).parse(brainParams.get("id"));
+      const detail = knowledgeNodeDetail(await getCorpus(brainId), id);
+      if (!detail) throw new HttpError(404, "This knowledge node is not in the selected brain.");
+      return json(detail);
+    }
+    if (route === "knowledge/coverage" && request.method === "GET") {
+      const input = z.object({ q: z.string().max(300).default(""), offset: z.coerce.number().int().min(0).max(1_000_000).default(0), limit: z.coerce.number().int().min(1).max(25).default(20) }).parse(Object.fromEntries(brainParams));
+      return json(await getQuestionCoverage(brainId, { query: input.q, offset: input.offset, limit: input.limit }));
+    }
+    if (route === "knowledge/jobs" && request.method === "GET") {
+      const [jobs, coverage] = await Promise.all([listKnowledgeJobs(brainId), getQuestionCoverage(brainId, { summaryOnly: true })]);
+      return json({ jobs: jobs.map(job => coverage.jobId === job.id ? { ...job, coverage: coverage.entries.map(entry => ({ question: entry.text, status: entry.status, nodeIds: entry.nodeIds })) } : job) });
+    }
+    if (route === "knowledge/jobs" && request.method === "POST") {
+      await requireUser(true);
+      const input = z.object({ sourceIds: z.array(z.string().min(1).max(150)).min(1).max(30), requirements: z.string().max(60_000).default(""), budgetUsd: z.number().min(0.05).max(10).default(3) }).parse(await body(request));
+      const job = await createKnowledgeJob(input, brainId, user.name);
+      await saveQuestionProfile(input.requirements, job.id, brainId);
+      return json(job, 201);
+    }
+    const knowledgeAction = route.match(/^knowledge\/jobs\/([0-9a-f-]{36})(?:\/(step|pause|resume))?$/i);
+    if (knowledgeAction) {
+      const id = z.string().uuid().parse(knowledgeAction[1]);
+      if (!knowledgeAction[2] && request.method === "GET") return json(await getKnowledgeJob(id, brainId));
+      if (request.method === "POST") {
+        await requireUser(true);
+        if (knowledgeAction[2] === "step") return json(await stepKnowledgeJob(id, brainId));
+        if (knowledgeAction[2] === "pause") return json(await pauseKnowledgeJob(id, brainId));
+        if (knowledgeAction[2] === "resume") {
+          const input = z.object({ budgetUsd: z.number().min(0.05).max(10).optional() }).parse(await body(request));
+          return json(await resumeKnowledgeJob(id, brainId, input));
+        }
+      }
+    }
     if (route === "workspace" && request.method === "GET") return json(await workspace(user, brainId));
     if (route === "source" && request.method === "GET") {
       const id = new URL(request.url).searchParams.get("id"), corpus = await getCorpus(brainId);
