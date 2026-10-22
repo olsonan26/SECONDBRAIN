@@ -202,12 +202,14 @@ test("resumable three-worker extraction isolates storage, accounts real usage an
       assert.equal(failed.nodesAdded,0);
       assert.equal((await getCorpus(failedBrain.id)).nodes.length,0,'Truncated content must never enter the graph.');
       globalThis.fetch=async()=>{failedCalls++;throw new DOMException('timeout','TimeoutError');};
-      await resumeKnowledgeJob(truncated.id,failedBrain.id,{budgetUsd:.025});
+      // Allow one bounded reservation with the complete format guidance, but
+      // not a second call whose billing is unknown. This is a test-only cap.
+      await resumeKnowledgeJob(truncated.id,failedBrain.id,{budgetUsd:.04});
       await stepKnowledgeJob(truncated.id,failedBrain.id);
       const timedOut=await stepKnowledgeJob(truncated.id,failedBrain.id);
       assert.equal(timedOut.stage,'paused-budget');
       assert.equal(failedCalls,4,'Unknown billing is fully reserved, preventing another unsafe paid retry.');
-      assert.ok(timedOut.costUsd>0 && timedOut.costUsd<=.025);
+      assert.ok(timedOut.costUsd>0 && timedOut.costUsd<=.04);
       assert.equal(timedOut.measuredCostUsd,.003);
       assert.equal(Math.round((timedOut.estimatedCostUsd+timedOut.measuredCostUsd)*1e8)/1e8,timedOut.costUsd);
       await resumeKnowledgeJob(truncated.id,failedBrain.id,{budgetUsd:.1});

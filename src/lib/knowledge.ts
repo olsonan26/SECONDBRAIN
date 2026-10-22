@@ -9,13 +9,14 @@ import { getCorpus, invalidateCorpus } from "./corpus";
 import { getSettings } from "./model";
 import { modelConnection, modelError } from "./model-provider";
 import { listRecords, readRecord, updateRecord, writeRecord } from "./storage";
-import { applicationInstructions, extractionSchema, extractionShape, finalVerificationInstructions, finalVerificationSchema, independentlyVerifiedFragment, knowledgeInstructions, reviewSchema, reviewShape, type Extraction, type KnowledgeReview, type PassageAudit } from "./knowledge-schema";
+import { applicationInstructions, extractionShape, finalVerificationInstructions, independentlyVerifiedFragment, knowledgeInstructions, reviewShape, type Extraction, type KnowledgeReview, type PassageAudit } from "./knowledge-schema";
 import { granularityInstructions as teachingGranularityInstructions, processingNoteInstructions, validatedEvidence } from "./knowledge-schema";
 import { reusableKnowledgeInstructions, usefulnessVerificationInstructions, substantiveKnowledgeInstructions } from "./knowledge-usefulness";
 import { imageMessages, imageContextCeiling } from "./knowledge-images";
 import { mergeRepeatedTeachings, mergeGraphEdges } from "./knowledge-dedup";
+import { parseKnowledgeResponse, responseFormatInstructions, type ValidationHold } from "./knowledge-response";
 
-const granularityInstructions = `${teachingGranularityInstructions}\n${processingNoteInstructions}\n${substantiveKnowledgeInstructions}`;
+const granularityInstructions = `${teachingGranularityInstructions}\n${processingNoteInstructions}\n${substantiveKnowledgeInstructions}\n${responseFormatInstructions}`;
 
 const LEASE_MS = 150_000;
 const MAX_COMPLETION_TOKENS = 12_000;
@@ -28,7 +29,7 @@ type Phase = "extract" | "review" | "verify";
 type Batch = {
   id: string; passageIds: string[]; phase: Phase; state: "pending" | "leased" | "done" | "failed";
   attempts: number; revision: number; lease?: { token: string; expiresAt: number; reservation: number };
-  candidate?: Extraction; review?: KnowledgeReview; error?: string;
+  candidate?: Extraction; review?: KnowledgeReview; error?: string; validationHolds?: ValidationHold[];
 };
 export interface KnowledgeJob {
   imagePassageIds?: string[];
@@ -243,7 +244,7 @@ export async function resumeKnowledgeJob(id: string, brainId: string, input: { b
     }
     const firstPassStillPending = job.batches.some(batch => batch.state === "pending" || batch.state === "leased");
     for (const batch of job.batches) if (!firstPassStillPending && batch.state === "done" && batch.passageIds.some(p => job.passages.some(a => a.passageId === p && a.disposition === "unresolved"))) {
-      batch.state = "pending"; batch.phase = "extract"; batch.attempts = 0; batch.revision += 1; batch.candidate = undefined; batch.review = undefined;
+      batch.state = "pending"; batch.phase = "extract"; batch.attempts = 0; batch.revision += 1; batch.candidate = undefined; batch.review = undefined; batch.validationHolds = undefined;
       for (const audit of job.passages) if (batch.passageIds.includes(audit.passageId) && audit.disposition === "unresolved") { audit.disposition = "pending"; audit.reason = "Requeued for explicit follow-up review."; }
     }
     job.stage = "running"; job.error = undefined; job.updatedAt = stamp(); logActivity(job, "checkpoint", "Owner resumed the saved pass with all previous knowledge, reviewed passages and spending retained."); updateStage(job); return job;
@@ -371,6 +372,7 @@ export async function stepKnowledgeJob(id: string, brainId: string) {
   let reviewedCandidate: KnowledgeReview | undefined;
   let reviewed: Fragment | undefined;
   let receipt: Receipt | undefined;
+  let validationHolds: ValidationHold[] = [];
   let providerRequested = false;
   try {
     const messages = await imageMessages(promptFor(claimed, batch, passages, corpus), passages);
@@ -383,17 +385,27 @@ export async function stepKnowledgeJob(id: string, brainId: string) {
     if (result.error) { const status = Number(result.error.code) || 502; if ([400, 401, 402, 403, 404, 429].includes(status)) fatalStatus = status; throw new Error(modelError(connection.label, status)); }
     if (result.choices?.[0]?.finish_reason !== "stop") { truncated = result.choices?.[0]?.finish_reason === "length"; throw new Error("The model response was truncated or did not finish normally. No partial knowledge was accepted."); }
     const parsed = JSON.parse(result.choices?.[0]?.message?.content ?? "");
-    if (batch.phase === "extract") extracted = extractionSchema.parse(parsed);
-    else if (batch.phase === "review") reviewedCandidate = reviewSchema.parse(parsed);
+    const context = { passageIds: batch.passageIds, candidate: batch.candidate, review: batch.review };
+    if (batch.phase === "extract") { const response = parseKnowledgeResponse("extract", parsed, context); extracted = response.value; validationHolds = response.holds; }
+    else if (batch.phase === "review") { const response = parseKnowledgeResponse("review", parsed, context); reviewedCandidate = response.value; validationHolds = response.holds; }
     else {
       if (!batch.candidate) throw new Error("The extraction candidate was not saved; retry this batch.");
       if (!batch.review) throw new Error("The omission review was not saved; retry this batch.");
-      reviewed = independentlyVerifiedFragment(batch.candidate, batch.review, finalVerificationSchema.parse(parsed), passages, id, corpus);
+      const response = parseKnowledgeResponse("verify", parsed, context); validationHolds = response.holds;
+      const held = [...(batch.validationHolds ?? []), ...validationHolds];
+      const keys = new Set(held.flatMap(hold => hold.teachingKey ? [hold.teachingKey] : []));
+      const verification = { ...response.value, teachings: response.value.teachings.filter(check => !keys.has(check.key)) };
+      reviewed = independentlyVerifiedFragment(batch.candidate, batch.review, verification, passages, id, corpus);
+      const unresolved = new Set(held.flatMap(hold => hold.passageIds));
+      for (const audit of reviewed.audits) if (unresolved.has(audit.passageId)) { audit.disposition = "unresolved"; audit.reason = "One or more model entries failed validation and were saved in the private review archive. Independently verified teachings were kept; this passage is not marked complete."; }
+      if (held.length) reviewed.warnings.push(`${held.length} model entry/entries held in private review because their format or required verification fields were invalid. Valid entries still required independent evidence and usefulness checks; affected passages remain unresolved.`);
+      if (validationHolds.length) await writeRecord(brainKey(brainId, `knowledge/review/${id}-${batch.id}-${batch.revision}-verify-${token}.json`), { phase: batch.phase, rawResponse: parsed, validationHolds, imageIds: passages.map(passage => passage.image?.id).filter(Boolean) });
       if (reviewed.audits.some(audit => audit.disposition === "unresolved")) await writeRecord(brainKey(brainId, `knowledge/review/${id}-${batch.id}-${batch.revision}.json`), { candidate: batch.candidate, review: batch.review, verification: parsed, audits: reviewed.audits, imageIds: passages.map(passage => passage.image?.id).filter(Boolean) });
       const current = await readJob(id, brainId);
       if (current.batches.find(b => b.id === batch.id)?.lease?.token !== token) throw new Error("This request lost its lease. No unowned result was saved.");
       receipt = await appendFragment(brainId, claimed, batch, reviewed, { ...accountedUsage(usage, batch.lease!.reservation), token });
     }
+    if (batch.phase !== "verify" && validationHolds.length) await writeRecord(brainKey(brainId, `knowledge/review/${id}-${batch.id}-${batch.revision}-${batch.phase}-${token}.json`), { phase: batch.phase, rawResponse: parsed, validationHolds, imageIds: passages.map(passage => passage.image?.id).filter(Boolean) });
     resultAccepted = true;
   } catch (error) {
     if (!providerRequested) usage = { cost: 0, prompt_tokens: 0, completion_tokens: 0 };
@@ -409,6 +421,10 @@ export async function stepKnowledgeJob(id: string, brainId: string) {
     if (providerRequested && passages.some(passage => passage.image)) logActivity(job, "image-input", `Sent ${passages.filter(passage => passage.image).length} original page image(s) to ${job.model} for ${batch.phase}; source bytes matched the recorded SHA256 fingerprint.`, batch.passageIds);
     if (!accounted.measured) addWarning(job, "At least one call did not return a measured dollar cost. Safety spend includes conservative accounting rather than claiming exact provider billing.");
     currentBatch.lease = undefined;
+    if (resultAccepted && validationHolds.length) {
+      currentBatch.validationHolds = [...(currentBatch.validationHolds ?? []), ...validationHolds];
+      logActivity(job, "validation-review", `${validationHolds.length} invalid model entry/entries saved for private review. Other entries continue through independent verification; affected passages will remain unresolved. No whole-batch format retry was queued.`, [...new Set(validationHolds.flatMap(hold => hold.passageIds))]);
+    }
     if (resultAccepted && extracted) { currentBatch.candidate = extracted; currentBatch.phase = "review"; currentBatch.state = "pending"; currentBatch.attempts = 0; currentBatch.error = undefined; }
     else if (resultAccepted && reviewedCandidate) { currentBatch.review = reviewedCandidate; currentBatch.phase = "verify"; currentBatch.state = "pending"; currentBatch.attempts = 0; currentBatch.error = undefined; }
     else if (resultAccepted && reviewed && receipt) {
