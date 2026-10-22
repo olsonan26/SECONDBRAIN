@@ -3,8 +3,8 @@ import { readFileSync } from "node:fs";
 import assert from "node:assert/strict";
 import { RECOVERED_ASTROLOGY_ID, ORIGINAL_PHOTO_SOURCE_ID } from "../src/lib/fresh-scan-policy";
 
-// Read-only production smoke test. Never resume, step, refresh paid provider
-// usage, change settings or interrupt an owner's running extraction.
+// Default is read-only. --check-resume exercises Resume with every /step
+// intercepted locally, then restores Pause. No provider call is permitted.
 async function main() {
   const origin = "https://secondbrain-nu-nine.vercel.app";
   const access = readFileSync("ACCESS-PRIVATE.txt", "utf8");
@@ -41,8 +41,35 @@ async function main() {
         await expect(page.getByRole("heading", { name: `Full-book pass ${job.scanPass ?? 1} of 3` })).toBeVisible({ timeout: 30000 });
         if (name === "Alex" && job.stage === "paused") await expect(page.getByRole("button", { name: "Resume", exact: true })).toBeEnabled();
         if (name === "Peter") await expect(page.getByRole("button", { name: "Resume", exact: true })).toHaveCount(0);
+        await expect(page.getByText("Cost controls: untouched adjacent photos share two-page batches;", { exact: false })).toBeVisible();
         assert.equal(errors.length, 0, "No browser runtime errors");
         assert.equal(blockedSteps, 0, "Opening the page must not start a paid scan");
+        if (name === "Alex" && process.argv.includes("--check-resume")) {
+          assert.equal(job.stage, "paused", "Never interrupt or automatically resume an active scan during verification");
+          const endpoint = `${origin}/api/knowledge/jobs/${job.id}`;
+          const before = await (await context.request.get(`${endpoint}?brain=${RECOVERED_ASTROLOGY_ID}`)).json();
+          try {
+            const responsePromise = page.waitForResponse(response => response.url().includes(`/${job.id}/resume?`) && response.request().method() === "POST");
+            await page.getByRole("button", { name: "Resume", exact: true }).click();
+            assert.equal((await responsePromise).status(), 200);
+            await expect.poll(() => blockedSteps).toBeGreaterThan(0);
+          } finally {
+            await page.close();
+            const pause = await context.request.post(`${endpoint}/pause?brain=${RECOVERED_ASTROLOGY_ID}`, { headers: { Origin: origin }, data: {} });
+            assert.equal(pause.status(), 200);
+          }
+          const after = await (await context.request.get(`${endpoint}?brain=${RECOVERED_ASTROLOGY_ID}`)).json();
+          assert.equal(after.stage, "paused");
+          for (const key of ["costUsd", "budgetUsd", "nodesAdded", "processedPassages"]) assert.equal(after[key], before[key], `${key} must not change during a no-spend Resume test`);
+          for (const saved of before.batches.filter((batch: { state: string; phase: string }) => batch.state === "done" || batch.phase !== "extract")) {
+            const retained = after.batches.find((batch: { id: string }) => batch.id === saved.id);
+            assert.ok(retained, "Existing completed/review batch identities must be retained");
+            assert.deepEqual(retained.passageIds, saved.passageIds);
+            assert.equal(retained.phase, saved.phase);
+          }
+          assert.equal(after.batches.flatMap((batch: { passageIds: string[] }) => batch.passageIds).length, 1028);
+          console.log(JSON.stringify({ realResumeVerified: true, pairedBatches: after.batches.filter((batch: { passageIds: string[] }) => batch.passageIds.length === 2).length, savedProgressRetained: true, spendingUnchanged: true, restoredToPaused: true, paidCallsStarted: 0 }));
+        }
         console.log(JSON.stringify({ account: name, login: "ok", extractionUI: "ok", stage: job.stage, pass: job.scanPass ?? 1, processed: job.processedPassages, nodesAdded: job.nodesAdded, costUsd: job.costUsd, budgetUsd: job.budgetUsd, browserErrors: errors.length, paidCallsStarted: 0 }));
       } finally { await context.close(); }
     }

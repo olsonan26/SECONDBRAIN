@@ -15,6 +15,7 @@ import { reusableKnowledgeInstructions, usefulnessVerificationInstructions, subs
 import { imageMessages, imageContextCeiling } from "./knowledge-images";
 import { mergeRepeatedTeachings, mergeGraphEdges } from "./knowledge-dedup";
 import { parseKnowledgeResponse, responseFormatInstructions, type ValidationHold } from "./knowledge-response";
+import { knowledgeNavigation } from "./knowledge-context";
 
 const granularityInstructions = `${teachingGranularityInstructions}\n${processingNoteInstructions}\n${substantiveKnowledgeInstructions}\n${responseFormatInstructions}`;
 
@@ -54,11 +55,31 @@ export const knowledgePassageHash = (passage: Passage) => hash(passage.text + (p
 function makeBatches(passages: Passage[], prefix = ""): Batch[] {
   const batches: Batch[] = [];
   for (let offset = 0; offset < passages.length;) {
-    const count = passages[offset].image || passages[offset + 1]?.image ? 1 : BATCH_SIZE;
+    const count = passages[offset].sourceId === passages[offset + 1]?.sourceId ? BATCH_SIZE : 1;
     batches.push({ id: `${prefix}${batches.length}`, passageIds: passages.slice(offset, offset + count).map(passage => passage.id), phase: "extract", state: "pending", attempts: 0, revision: 0 });
     offset += count;
   }
   return batches;
+}
+function pairUntouchedPhotos(job: KnowledgeJob) {
+  const photos = new Set(job.imagePassageIds ?? []);
+  const order = new Map(job.passages.map((passage, index) => [passage.passageId, { ...passage, index }]));
+  const untouched = (batch: Batch) => {
+    const audit = order.get(batch.passageIds[0]);
+    // Legacy retry counters can have been reset by a prior Resume. A pristine
+    // coverage audit is also required before changing the batch identity.
+    return batch.state === "pending" && batch.phase === "extract" && batch.attempts === 0 && batch.revision === 0 && !batch.lease && !batch.candidate && !batch.review && batch.passageIds.length === 1 && photos.has(batch.passageIds[0]) && audit?.disposition === "pending" && !audit.nodeIds.length && ["Not yet independently reviewed.", "Awaiting the next full-book coverage pass."].includes(audit.reason);
+  };
+  const paired: Batch[] = [];
+  for (let index = 0; index < job.batches.length; index++) {
+    const first = job.batches[index], next = job.batches[index + 1];
+    const a = order.get(first.passageIds[0]), b = next && order.get(next.passageIds[0]);
+    if (next && untouched(first) && untouched(next) && a && b && a.sourceId === b.sourceId && b.index === a.index + 1) {
+      paired.push({ id: `pair-${first.id}-${next.id}`, passageIds: [...first.passageIds, ...next.passageIds], phase: "extract", state: "pending", attempts: 0, revision: 0 });
+      index++;
+    } else paired.push(first);
+  }
+  job.batches = paired;
 }
 function jobKey(brainId: string, id: string) {
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)) throw new HttpError(400, "Invalid knowledge extraction job ID.");
@@ -154,6 +175,8 @@ function releaseExpired(job: KnowledgeJob) {
     batch.lease = undefined;
     batch.state = batch.attempts >= MAX_ATTEMPTS ? "failed" : "pending";
     batch.error = "The previous extraction request was interrupted. Its result was not accepted.";
+    job.stage = "paused";
+    job.error = "An interrupted request has uncertain billing. Progress and the conservative spending estimate are saved. No automatic paid retry will start; review spending before explicitly resuming.";
   }
 }
 export const MAX_KNOWLEDGE_BUDGET_USD = 10;
@@ -226,6 +249,9 @@ export async function resumeKnowledgeJob(id: string, brainId: string, input: { b
   const initial = await readJob(id, brainId);
   return summary(await updateRecord(jobKey(brainId, id), initial, job => {
     releaseExpired(job);
+    // Pair only never-started legacy image work. Saved candidates, reviews,
+    // failed/charged attempts, receipts and completed pages keep their IDs.
+    pairUntouchedPhotos(job);
     // Older saved jobs may still have larger batches. Shrink only untouched
     // extraction work; never discard a completed review or an active lease.
     job.batches = job.batches.flatMap(batch => {
@@ -253,10 +279,6 @@ export async function resumeKnowledgeJob(id: string, brainId: string, input: { b
 
 function promptFor(job: KnowledgeJob, batch: Batch, passages: Passage[], corpus: Corpus) {
   const contextIds = new Set(batch.passageIds);
-  const contextWords = new Set(passages.flatMap(p => p.text.toLowerCase().match(/[\p{L}\p{N}']{4,}/gu) ?? []));
-  const existing = corpus.nodes.filter(node => node.type === "teaching").map(node => ({ node, score: node.evidence?.some(evidence => contextIds.has(evidence.passageId)) ? 1000 : (node.label.toLowerCase().match(/[\p{L}\p{N}']{4,}/gu) ?? []).filter(word => contextWords.has(word)).length })).filter(item => item.score >= 2).sort((a, b) => b.score - a.score).slice(0, 60).map(item => item.node);
-  const existingIds = new Set(existing.map(node => node.id));
-  const nodeLabels = new Map(corpus.nodes.map(node => [node.id, node.label]));
   const boundary: Passage[] = [];
   for (const passage of passages) {
     const index = corpus.passages.findIndex(p => p.id === passage.id);
@@ -274,7 +296,7 @@ function promptFor(job: KnowledgeJob, batch: Batch, passages: Passage[], corpus:
       boundaryContextNotTarget: boundary.map(p => ({ page: p.page, text: p.text.slice(0, 2200) })),
       ...(batch.error ? { previousValidationFailureNotEvidence: batch.error } : {}),
       duplicateCheckInstructions: "Final verifier: compare every proposed claim with the other proposed claims and existing graph nodes. For a strictly identical atomic claim with all the same conditions and exceptions, include duplicateOf (the earlier proposed key or existing node id) on its teaching check. This authorizes merging provenance, not new facts. Never merge merely related, overlapping, opposite, or differently conditioned claims. Mark bundled multi-teaching proposals unsupported and the passage incomplete; each distinct rule must be independently retrievable. Do not complete cut-off sentences from general knowledge.",
-      existingGraphNavigationNotEvidence: { nodes: existing.map(node => ({ id: node.id, label: node.label, teaching: node.description.slice(0, 1200) })), relationships: corpus.edges.filter(edge => existingIds.has(edge.source) || existingIds.has(edge.target)).slice(0, 80).map(edge => ({ source: nodeLabels.get(edge.source), relation: edge.relation, target: nodeLabels.get(edge.target) })) },
+      existingGraphNavigationNotEvidence: knowledgeNavigation(corpus, passages, batch.phase),
       ownerUsefulnessPreferencesNotEvidence: (job.questions ?? []).filter(question => question.answer && contextIds.has(question.passageId)).map(question => ({ passageId: question.passageId, preference: question.answer, note: question.note })),
       ...(batch.phase === "review" ? { candidate: batch.candidate } : batch.phase === "verify" ? { proposedTeachings: [...(batch.candidate?.teachings ?? []), ...(batch.review?.additions ?? [])], proposedRelationships: batch.review?.relationships ?? [], proposedPassages: batch.review?.passages ?? [] } : {}) }) },
   ];
@@ -374,13 +396,25 @@ export async function stepKnowledgeJob(id: string, brainId: string) {
   let receipt: Receipt | undefined;
   let validationHolds: ValidationHold[] = [];
   let providerRequested = false;
+  let preExecutionRejected = false;
   try {
-    const messages = await imageMessages(promptFor(claimed, batch, passages, corpus), passages);
+    const messages = await imageMessages(promptFor(claimed, batch, passages, corpus), passages, 2);
     providerRequested = true;
     const response = await fetch(connection.url, { method: "POST", headers: connection.headers, signal: AbortSignal.timeout(85_000),
       body: JSON.stringify({ model: settings.model, temperature: 0, max_tokens: MAX_COMPLETION_TOKENS, ...connection.options,
         provider: { max_price: { prompt: 0.35, completion: 1.4, request: 0 }, sort: "throughput" }, usage: { include: true }, response_format: { type: "json_object" }, messages }) });
-    if (!response.ok) { if ([400, 401, 402, 403, 404, 429].includes(response.status)) fatalStatus = response.status; throw new Error(modelError(connection.label, response.status)); }
+    if (!response.ok) {
+      // OpenRouter HTTP authentication/credit refusals precede generation.
+      // This does NOT apply to errors inside HTTP 200 or to timeouts/429s.
+      // If a refusal supplies usage, preserve it rather than assuming free.
+      if ([401, 402].includes(response.status)) {
+        const refusal = await response.json().catch(() => null);
+        usage = refusal?.usage ?? { prompt_tokens: 0, completion_tokens: 0 };
+        preExecutionRejected = refusal?.usage == null;
+      }
+      if ([400, 401, 402, 403, 404, 429].includes(response.status)) fatalStatus = response.status;
+      throw new Error(modelError(connection.label, response.status));
+    }
     const result = await response.json(); usage = result.usage;
     if (result.error) { const status = Number(result.error.code) || 502; if ([400, 401, 402, 403, 404, 429].includes(status)) fatalStatus = status; throw new Error(modelError(connection.label, status)); }
     if (result.choices?.[0]?.finish_reason !== "stop") { truncated = result.choices?.[0]?.finish_reason === "length"; throw new Error("The model response was truncated or did not finish normally. No partial knowledge was accepted."); }
@@ -419,7 +453,8 @@ export async function stepKnowledgeJob(id: string, brainId: string) {
     if (currentBatch.lease?.token !== token) return job;
     applyAccounting(job, token, accounted);
     if (providerRequested && passages.some(passage => passage.image)) logActivity(job, "image-input", `Sent ${passages.filter(passage => passage.image).length} original page image(s) to ${job.model} for ${batch.phase}; source bytes matched the recorded SHA256 fingerprint.`, batch.passageIds);
-    if (!accounted.measured) addWarning(job, "At least one call did not return a measured dollar cost. Safety spend includes conservative accounting rather than claiming exact provider billing.");
+    if (!accounted.measured && !preExecutionRejected) addWarning(job, "At least one call did not return a measured dollar cost. Safety spend includes conservative accounting rather than claiming exact provider billing.");
+    if (preExecutionRejected) logActivity(job, "billing", "OpenRouter rejected this request for authentication or credits before generation. The unused reservation was released; no provider-reported cost was invented. Earlier spending and unresolved estimates were not changed.", batch.passageIds);
     currentBatch.lease = undefined;
     if (resultAccepted && validationHolds.length) {
       currentBatch.validationHolds = [...(currentBatch.validationHolds ?? []), ...validationHolds];
@@ -449,6 +484,10 @@ export async function stepKnowledgeJob(id: string, brainId: string) {
       } else { currentBatch.error = failure; currentBatch.state = fatalStatus && fatalStatus !== 429 || currentBatch.attempts >= MAX_ATTEMPTS ? "failed" : "pending"; job.error = failure; }
       if (currentBatch.state === "failed") for (const audit of job.passages) if (currentBatch.passageIds.includes(audit.passageId)) { audit.disposition = "unresolved"; audit.reason = `Repeated ${currentBatch.phase} failure: ${failure}`; }
       if (fatalStatus) job.stage = fatalStatus === 429 ? "paused" : "failed";
+      else if (providerRequested && !accounted.measured) {
+        job.stage = "paused";
+        job.error = `${failure} Billing is uncertain, so no automatic paid retry will start. The conservative estimate and saved checkpoint are retained; review spending before explicitly resuming.`;
+      }
     }
     if (!resultAccepted) logActivity(job, "attention", job.error || failure, batch.passageIds);
     if (job.costUsd > job.budgetUsd) { job.stage = "paused-budget"; job.error = "Reported provider usage exceeded its conservative reservation. Extraction stopped; no further calls will be made."; }
