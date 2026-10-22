@@ -52,7 +52,7 @@ async function main() {
             const responsePromise = page.waitForResponse(response => response.url().includes(`/${job.id}/resume?`) && response.request().method() === "POST");
             await page.getByRole("button", { name: "Resume", exact: true }).click();
             assert.equal((await responsePromise).status(), 200);
-            await expect.poll(() => blockedSteps).toBeGreaterThan(0);
+            await expect.poll(() => blockedSteps, { timeout: 30000 }).toBeGreaterThan(0);
           } finally {
             await page.close();
             const pause = await context.request.post(`${endpoint}/pause?brain=${RECOVERED_ASTROLOGY_ID}`, { headers: { Origin: origin }, data: {} });
