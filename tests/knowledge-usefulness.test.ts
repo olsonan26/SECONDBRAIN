@@ -67,6 +67,31 @@ test("arbitrary alphabetical keyword bundles are unresolved teachings, not exclu
   assert.equal(extract(atomic, "Retrograde correspondence: Absorbing", { decision: "teaching", teachingClass: "correspondence", technicalStatement: atomic, applicationQuestion: "What is one keyword associated with retrogrades?", reason: "One explicit subject association." }).nodes.length, 1);
 });
 
+test("a workplace reputation anecdote is not a worked chart calculation even when the model calls it one", () => {
+  const text = "The author attributes a workplace nickname and the team's good or bad sales days to a planetary combination, but demonstrates no chart calculation or reading operation.";
+  const result = extract(text, "Worked example: planetary combination credited for a workplace reputation", { decision: "teaching", teachingClass: "worked-example", technicalStatement: text, applicationQuestion: "How did this planetary combination affect the author's career?", reason: "The story names a planetary combination." });
+  assert.equal(result.nodes.length, 0);
+  assert.equal(result.audits[0].disposition, "excluded-noise");
+});
+
+test("criticism of competing definitions and promises to explain a term are not independent teachings", () => {
+  for (const [label, text] of [
+    ["Author's critique of competing aspect definitions as vague and context-dependent", "The author criticizes competing definitions as vague without stating a replacement calculation in this assertion."],
+    ["Vantage is a named term for a relationship to be explained later", "The author names Vantage as a new word and promises to explain it later; no definition is supplied in this assertion."],
+  ]) {
+    const result = extract(text, label, { decision: "teaching", teachingClass: "technical-definition", technicalStatement: text, applicationQuestion: "What does this technical term mean in this method?", reason: "The text is explicitly present." });
+    assert.equal(result.nodes.length, 0, label);
+  }
+});
+
+test("a genuine worked orb comparison, replacement timing rule and defined term survive stricter anecdote checks", () => {
+  for (const [label, text] of [
+    ["Worked example: asymmetric orbs", "In this example the Moon's 3-degree orb does not reach the Sun, but the Sun's 10-degree orb creates the stated trine."],
+    ["Alternative timing rule", "Unlike a birthday reset, this method starts its annual activation at the vernal equinox."],
+    ["Vantage definition", "Vantage denotes the viewpoint of the energy being assessed in the stated chart-reading operation."],
+  ]) assert.equal(extract(text, label, { decision: "teaching", teachingClass: "interpretation-rule", technicalStatement: text, applicationQuestion: "Which exact convention or operation does this statement teach?", reason: "A specific subject proposition is supplied." }).nodes.length, 1, label);
+});
+
 test("a mere evidence check cannot bypass a missing or uncertain usefulness assessment", () => {
   const text = "The activation begins at the vernal equinox, not on a birthday.";
   assert.equal(extract(text, "Activation timing").nodes.length, 0);

@@ -37,7 +37,7 @@ async function main() {
   assert.deepEqual(corpus.value.sources, record.value.sources); assert.deepEqual(corpus.value.passages, record.value.passages);
   const updated = settleQualityAudit(lockedJob.value, corpus.value, manifest);
   updated.updatedAt = new Date().toISOString();
-  updated.activity = [...(updated.activity ?? []), { at: updated.updatedAt, pass: updated.scanPass ?? 1, phase: "operator-audit", message: "Source-photo sample audit corrected or held specific nodes, split keyword associations and added verified omissions. Originals, prior spending and the cap were retained; this is not a full-book accuracy certificate.", passageIds: plan.receipt.passageIds }].slice(-300);
+  updated.activity = [...(updated.activity ?? []), { at: updated.updatedAt, pass: updated.scanPass ?? 1, phase: "operator-audit", message: "Source-photo sample audit applied explicit corrections, holds, consolidations and verified additions. Originals, prior spending and the cap were retained; this is not a full-book accuracy certificate.", passageIds: plan.receipt.passageIds }].slice(-300);
   for (const key of ["costUsd", "measuredCostUsd", "estimatedCostUsd", "budgetUsd", "accountedCalls", "batches", "passHistory"] as const) assert.deepEqual(updated[key], checkpoint.value[key]);
   await supabaseWrite(jobKey, updated, lockedJob.etag);
   const verified = await supabaseRead<KnowledgeJob>(jobKey); assert.ok(verified); assert.equal(verified.value.qualityAuditLock, undefined); assert.equal(verified.value.stage, "paused"); assert.ok(verified.value.qualityAuditsApplied?.includes(manifest.id));

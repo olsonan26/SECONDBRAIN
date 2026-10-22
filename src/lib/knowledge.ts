@@ -11,13 +11,13 @@ import { modelConnection, modelError } from "./model-provider";
 import { listRecords, readRecord, updateRecord, writeRecord } from "./storage";
 import { applicationInstructions, extractionShape, finalVerificationInstructions, independentlyVerifiedFragment, knowledgeInstructions, reviewShape, type Extraction, type KnowledgeReview, type PassageAudit } from "./knowledge-schema";
 import { granularityInstructions as teachingGranularityInstructions, processingNoteInstructions, validatedEvidence } from "./knowledge-schema";
-import { reusableKnowledgeInstructions, usefulnessVerificationInstructions, substantiveKnowledgeInstructions, operatorAuditInstructions } from "./knowledge-usefulness";
+import { reusableKnowledgeInstructions, usefulnessVerificationInstructions, substantiveKnowledgeInstructions, operatorAuditInstructions, sourceConsistencyInstructions } from "./knowledge-usefulness";
 import { imageMessages, imageContextCeiling } from "./knowledge-images";
 import { mergeRepeatedTeachings, mergeGraphEdges } from "./knowledge-dedup";
 import { parseKnowledgeResponse, responseFormatInstructions, type ValidationHold } from "./knowledge-response";
 import { knowledgeNavigation } from "./knowledge-context";
 
-const granularityInstructions = `${teachingGranularityInstructions}\n${processingNoteInstructions}\n${substantiveKnowledgeInstructions}\n${responseFormatInstructions}\n${operatorAuditInstructions}`;
+const granularityInstructions = `${teachingGranularityInstructions}\n${processingNoteInstructions}\n${substantiveKnowledgeInstructions}\n${responseFormatInstructions}\n${operatorAuditInstructions}\n${sourceConsistencyInstructions}`;
 
 const LEASE_MS = 150_000;
 const MAX_COMPLETION_TOKENS = 12_000;

@@ -103,6 +103,8 @@ test("resumable three-worker extraction isolates storage, accounts real usage an
         assert.equal(request.provider.sort,'throughput');
         assert.equal(request.max_tokens,12000);
         assert.match(request.messages[0].content,/processing reason and gaps entry concise/);
+        assert.match(request.messages[0].content,/SOURCE-CONSISTENCY AUDIT/,'Every extraction, review and verification call must receive the source-conflict instructions.');
+        assert.match(request.messages[0].content,/do NOT silently choose a value/);
         const data=JSON.parse(request.messages[1].content);
         const target=data.targetPassages;
         const teachings=target.map((p,i)=>({key:'t'+i,label:'Timing rule '+p.id,kind:'rule',topic:'Profection Activation',text:p.text,aliases:['activation'],applicationTags:['timing'],evidence:[{passageId:p.id,quote:p.text}]}));
