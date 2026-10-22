@@ -11,13 +11,13 @@ import { modelConnection, modelError } from "./model-provider";
 import { listRecords, readRecord, updateRecord, writeRecord } from "./storage";
 import { applicationInstructions, extractionShape, finalVerificationInstructions, independentlyVerifiedFragment, knowledgeInstructions, reviewShape, type Extraction, type KnowledgeReview, type PassageAudit } from "./knowledge-schema";
 import { granularityInstructions as teachingGranularityInstructions, processingNoteInstructions, validatedEvidence } from "./knowledge-schema";
-import { reusableKnowledgeInstructions, usefulnessVerificationInstructions, substantiveKnowledgeInstructions } from "./knowledge-usefulness";
+import { reusableKnowledgeInstructions, usefulnessVerificationInstructions, substantiveKnowledgeInstructions, operatorAuditInstructions } from "./knowledge-usefulness";
 import { imageMessages, imageContextCeiling } from "./knowledge-images";
 import { mergeRepeatedTeachings, mergeGraphEdges } from "./knowledge-dedup";
 import { parseKnowledgeResponse, responseFormatInstructions, type ValidationHold } from "./knowledge-response";
 import { knowledgeNavigation } from "./knowledge-context";
 
-const granularityInstructions = `${teachingGranularityInstructions}\n${processingNoteInstructions}\n${substantiveKnowledgeInstructions}\n${responseFormatInstructions}`;
+const granularityInstructions = `${teachingGranularityInstructions}\n${processingNoteInstructions}\n${substantiveKnowledgeInstructions}\n${responseFormatInstructions}\n${operatorAuditInstructions}`;
 
 const LEASE_MS = 150_000;
 const MAX_COMPLETION_TOKENS = 12_000;
@@ -34,6 +34,8 @@ type Batch = {
 };
 export interface KnowledgeJob {
   imagePassageIds?: string[];
+  qualityAuditLock?: string;
+  qualityAuditsApplied?: string[];
   scanPass?: number;
   passHistory?: { pass: number; finishedAt: string; nodesAdded: number; costUsd: number; audits: PassageAudit[] }[];
   activity?: { at: string; pass: number; phase: string; message: string; passageIds: string[] }[];
@@ -146,6 +148,7 @@ export async function startNextKnowledgePass(id: string, brainId: string) {
   await assertExtractionRecoverySafe(brainId, id);
   const initial = await readJob(id, brainId), corpus = await getCorpus(brainId);
   return summary(await updateRecord(jobKey(brainId, id), initial, job => {
+    if (job.qualityAuditLock) throw new HttpError(409, "An operator quality audit is saving source-checked corrections. Keep the scan paused until it finishes.");
     releaseExpired(job);
     if (!["complete", "needs-review"].includes(job.stage) || job.batches.some(batch => batch.state === "pending" || batch.state === "leased")) throw new HttpError(409, "Finish or resume the current pass before starting another whole-book pass.");
     const pass = job.scanPass ?? 1;
@@ -248,6 +251,7 @@ export async function resumeKnowledgeJob(id: string, brainId: string, input: { b
   if (input.budgetUsd !== undefined) validateBudget(input.budgetUsd);
   const initial = await readJob(id, brainId);
   return summary(await updateRecord(jobKey(brainId, id), initial, job => {
+    if (job.qualityAuditLock) throw new HttpError(409, "An operator quality audit is saving source-checked corrections. Keep the scan paused until it finishes.");
     releaseExpired(job);
     // Pair only never-started legacy image work. Saved candidates, reviews,
     // failed/charged attempts, receipts and completed pages keep their IDs.
@@ -371,6 +375,7 @@ export async function stepKnowledgeJob(id: string, brainId: string) {
   let claimedId: string | undefined;
   const claimed = await updateRecord(jobKey(brainId, id), initial, job => {
     claimedId = undefined;
+    if (job.qualityAuditLock) throw new HttpError(409, "An operator quality audit is saving source-checked corrections. No model call was started.");
     replayReceipts(job, corpus);
     releaseExpired(job);
     if (!["queued", "running"].includes(job.stage)) return job;

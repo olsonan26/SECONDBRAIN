@@ -46,6 +46,27 @@ test("calling obvious publishing metadata a teaching does not bypass the relevan
   assert.equal(fragment.nodes.length, 0);
 });
 
+test("editorial transitions and autobiographical house-system choices cannot masquerade as technical knowledge", () => {
+  const cases = [
+    ["House system choice: the author had difficulty switching from one system to another", "The author had a hard time switching house systems and promises to discuss the transition in another chapter."],
+    ["Author's claim: the standard profection technique needed to be fixed to make it work", "The author says the standard profection technique needed to be fixed, but gives no replacement timing rule in this assertion."],
+    ["After the mechanical function of retrogrades is known, the astrological translation is given as keywords for future interpreting", "Now that the mechanics have been explained, the chapter introduces a list of keywords for later interpreting."],
+  ];
+  for (const [label, text] of cases) {
+    const result = extract(text, label, { decision: "teaching", teachingClass: "reading-procedure", technicalStatement: text, applicationQuestion: "How does this technique work in a chart?", reason: "The statement is present on the page." });
+    assert.equal(result.nodes.length, 0, label);
+  }
+});
+
+test("arbitrary alphabetical keyword bundles are unresolved teachings, not excluded source noise", () => {
+  const text = "The retrograde keyword list associates retrogrades with Absorbing, Adjust, Attracting and Backtracking.";
+  const result = extract(text, "Retrograde keyword list (A–B): Absorbing, Adjust, Attracting, Backtracking", { decision: "teaching", teachingClass: "correspondence", technicalStatement: text, applicationQuestion: "Which meanings are associated with retrogrades?", reason: "The source lists these associations." });
+  assert.equal(result.nodes.length, 0);
+  assert.equal(result.audits[0].disposition, "unresolved", "Keep genuine bundled knowledge for splitting rather than claiming it was irrelevant.");
+  const atomic = "Retrograde is associated with the keyword Absorbing; no separate definition is supplied here.";
+  assert.equal(extract(atomic, "Retrograde correspondence: Absorbing", { decision: "teaching", teachingClass: "correspondence", technicalStatement: atomic, applicationQuestion: "What is one keyword associated with retrogrades?", reason: "One explicit subject association." }).nodes.length, 1);
+});
+
 test("a mere evidence check cannot bypass a missing or uncertain usefulness assessment", () => {
   const text = "The activation begins at the vernal equinox, not on a birthday.";
   assert.equal(extract(text, "Activation timing").nodes.length, 0);

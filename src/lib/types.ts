@@ -51,6 +51,7 @@ export interface GraphNode {
   applicationTags?: string[];
   evidence?: KnowledgeEvidence[];
   extractionJobId?: string;
+  qualityReview?: { auditId: string; reviewedAt: string; method: "original-photo-manual" };
 }
 export interface GraphEdge {
   id: string;
@@ -131,6 +132,7 @@ export interface Corpus {
     nodes: number; edges: number; audits?: KnowledgePassageAudit[]; warnings?: string[];
     usage?: { token: string; cost: number; measuredCost: number; inputTokens: number; outputTokens: number; measured: boolean };
   }>;
+  qualityAuditReceipts?: Record<string, { manifestHash: string; nodeDelta: number; edgeDelta: number; passageIds: string[] }>;
 }
 export interface Citation extends Passage { number: number; score: number; }
 export interface Answer {

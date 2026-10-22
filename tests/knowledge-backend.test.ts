@@ -315,6 +315,12 @@ test("resumable three-worker extraction isolates storage, accounts real usage an
       await stepKnowledgeJob(expiredJob.id,expiredBrain.id);
       assert.equal(calls,callsBeforeExpired);
       assert.equal((await getKnowledgeJob(expiredJob.id,expiredBrain.id)).costUsd,.02,'Unknown spend remains counted once, not once per refresh.');
+      const auditLocked=(await readRecord(expiredKey)).value;
+      auditLocked.qualityAuditLock='operator-source-audit-fixture';
+      await writeRecord(expiredKey,auditLocked);
+      await assert.rejects(()=>resumeKnowledgeJob(expiredJob.id,expiredBrain.id),/operator quality audit/);
+      await assert.rejects(()=>stepKnowledgeJob(expiredJob.id,expiredBrain.id),/operator quality audit/);
+      assert.equal(calls,callsBeforeExpired,'Operator correction lock prevents concurrent paid work.');
       const refusedBrain=await createBrain('Pre-execution credit rejection','Test only','Alex');
       await writeRecord(brainKey(refusedBrain.id,'corpus.json'),{...main,sources:[source],passages:[passages[0]],warnings:[]});
       const refused=await createKnowledgeJob({sourceIds:['book'],budgetUsd:1},refusedBrain.id,'Alex');
